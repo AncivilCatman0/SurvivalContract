@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "com.survivalcontract.client.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"LobbyFogMixin",
+		"AbstractContainerScreenMixin",
+		"CreateWorldScreenAccessor",
+		"CreateWorldScreenMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

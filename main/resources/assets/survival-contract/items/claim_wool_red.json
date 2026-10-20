@@ -1,0 +1,6 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "survival-contract:block/claim_wool_red"
+  }
+}
