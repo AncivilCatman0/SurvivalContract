@@ -125,11 +125,37 @@ public class LobbyManager {
 		if (lobbyLevel == null) return;
 		// 回大厅必须清空除挑战书外的全部物品（防止职业初始物品/局内物品被带进大厅）
 		clearInventoryExceptChallengeBook(player);
+		// 经验槽一并清零：任何路径回大厅都不残留上一局的等级/进度（第九十一批）
+		player.experienceLevel = 0;
+		player.experienceProgress = 0.0f;
+		player.totalExperience = 0;
+		BlockPos target = safeLobbySpawn();
 		player.teleportTo(lobbyLevel,
-			LOBBY_SPAWN.getX() + 0.5, LOBBY_SPAWN.getY() + 0.5, LOBBY_SPAWN.getZ() + 0.5,
+			target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5,
 			Set.of(), player.getYRot(), player.getXRot(), false);
 		player.setGameMode(net.minecraft.world.level.GameType.ADVENTURE);
 		// Simplified: skip advancement revocation (requires 2-arg API)
+	}
+
+	/**
+	 * 大厅落点：自定义大厅维度直接用配置坐标；
+	 * 若因数据包缺失回退到主世界（{@link #onServerStart} 的兜底），
+	 * 配置里的 y=-63 会把玩家送进虚空 —— 此时用高度图重新找一个安全地面。
+	 */
+	private BlockPos safeLobbySpawn() {
+		if (lobbyLevel == null) return LOBBY_SPAWN;
+		boolean fallbackOverworld = lobbyLevel == lobbyLevel.getServer().overworld();
+		if (!fallbackOverworld) return LOBBY_SPAWN;
+		try {
+			int y = lobbyLevel.getHeight(
+					net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+					LOBBY_SPAWN.getX(), LOBBY_SPAWN.getZ());
+			return y > lobbyLevel.getMinY()
+					? new BlockPos(LOBBY_SPAWN.getX(), y, LOBBY_SPAWN.getZ())
+					: LOBBY_SPAWN;
+		} catch (Exception e) {
+			return LOBBY_SPAWN;
+		}
 	}
 
 	/**
@@ -156,8 +182,13 @@ public class LobbyManager {
 		MinecraftServer server = player.level().getServer();
 		if (server == null) return;
 		// 传送到竞技场主世界（每局新建的随机种子维度）
+		// 竞技场缺失时绝不能退回原版主世界（会把玩家丢进"其他世界"）——直接报错并保留原地
 		ServerLevel arena = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (arena == null) arena = server.overworld(); // 兜底（正常不触发）
+		if (arena == null) {
+			SurvivalContract.LOGGER.error("teleportToPlayingWorld skipped for {}: arena overworld missing",
+					player.getName().getString());
+			return;
+		}
 
 		// 传送到该玩家的固定重生点（团队=队点，单人=个人点），坐标固定不波动
 		com.survivalcontract.game.GameStateManager gsm = com.survivalcontract.game.GameStateManager.getInstance();
@@ -232,7 +263,23 @@ public class LobbyManager {
 				com.survivalcontract.challenge.ChallengeManager.getInstance().clearPenaltyFlags();
 				com.survivalcontract.game.TeamChestManager.getInstance().clearAll();
 				// 交给附属模组：注入世界规则 / 分队出生 / 套餐 / HUD 等
-				provider.onGameStart(server, participants);
+				// 附属钩子异常必须整体回大厅：否则阶段已置 PLAYING 却没有对应地图/规则，
+				// 玩家会卡在一个"假对局"里（整局玩不了，第八十九批）
+				try {
+					provider.onGameStart(server, participants);
+				} catch (Exception e) {
+					SurvivalContract.LOGGER.error("[Addon] onGameStart failed for '{}', aborting to LOBBY",
+							provider.id(), e);
+					gsm.setCurrentPhase(GameStateManager.GamePhase.LOBBY);
+					gsm.clearRuntimeState();
+					for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+						p.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
+								"survival-contract.msg.arena_create_failed"));
+						teleportToLobby(p);
+					}
+					com.survivalcontract.network.NetworkRegistry.broadcastLobbyState(server);
+					return;
+				}
 				for (ServerPlayer p : server.getPlayerList().getPlayers()) {
 					com.survivalcontract.network.NetworkRegistry.sendSync(p);
 				}
@@ -314,10 +361,28 @@ public class LobbyManager {
 
 		// 0.5 创建全新随机种子的竞技场维度组（模仿 Yet Another Bingo：每局独立世界，
 		//     结束后删档）。必须在 setupNewRandomWorld 之前（出生点搜索需要竞技场主世界）
-		com.survivalcontract.dimension.ArenaWorldManager.createArenaWorlds(server);
+		// 失败（旧档删不掉/维度注册失败）必须中止开局：否则会退化成原版主世界地形，
+		// 文明时代的四种地形预设全部失效，玩家还会被丢进"其他世界"
+		if (!com.survivalcontract.dimension.ArenaWorldManager.createArenaWorlds(server)) {
+			SurvivalContract.LOGGER.error("startGame aborted: arena worlds could not be created.");
+			for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+				p.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
+						"survival-contract.msg.arena_create_failed"));
+			}
+			com.survivalcontract.dimension.ArenaWorldManager.teardownArenaWorlds(server);
+			return;
+		}
 
-		// 1. 先准备 PLAYING 世界（随机坐标 + WorldBorder + 初始分数）
-		gsm.setupNewRandomWorld(server);
+		// 1. 先准备 PLAYING 世界（随机坐标 + 初始分数）
+		if (!gsm.setupNewRandomWorld(server)) {
+			SurvivalContract.LOGGER.error("startGame aborted: PLAYING world setup failed (arena missing).");
+			for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+				p.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
+						"survival-contract.msg.arena_create_failed"));
+			}
+			com.survivalcontract.dimension.ArenaWorldManager.teardownArenaWorlds(server);
+			return;
+		}
 
 		// 1.2 神的谎言：随机任命使者（清空其规则集 = 免疫所有规则；开局分与平民一致 = 100）
 		if (gsm.isGodsLies()) {

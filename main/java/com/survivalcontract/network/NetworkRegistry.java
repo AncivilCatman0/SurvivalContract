@@ -1254,7 +1254,14 @@ public class NetworkRegistry {
             if (GameStateManager.getInstance().getCurrentPhase()
                     == GameStateManager.GamePhase.LOBBY) {
                 var dm = com.survivalcontract.dimension.LobbyManager.getInstance();
-                dm.startGame(player.level().getServer());
+                try {
+                    dm.startGame(player.level().getServer());
+                } catch (Exception e) {
+                    // 网络包处理器异常会踢掉玩家/中断连接：这里兜住并告知，服务端继续运行
+                    com.survivalcontract.SurvivalContract.LOGGER.error("[Network] startGame failed", e);
+                    player.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
+                            "survival-contract.msg.arena_create_failed"));
+                }
             } else {
                 player.sendSystemMessage(net.minecraft.network.chat.Component.translatable("survival-contract.msg.game_already_running"));
             }
@@ -1294,7 +1301,13 @@ public class NetworkRegistry {
                 int count = gsm.registerLobbyStart(player.getUUID());
                 if (count >= need) {
                     var dm = com.survivalcontract.dimension.LobbyManager.getInstance();
-                    dm.startGame(context.server());
+                    try {
+                        dm.startGame(context.server());
+                    } catch (Exception e) {
+                        com.survivalcontract.SurvivalContract.LOGGER.error("[Network] startGame failed (vote)", e);
+                        player.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
+                                "survival-contract.msg.arena_create_failed"));
+                    }
                 } else {
                     player.sendSystemMessage(net.minecraft.network.chat.Component.translatable(
                             "survival-contract.msg.start_confirm_count", count, need));
@@ -1425,7 +1438,7 @@ public class NetworkRegistry {
                             "survival-contract.msg.godslies.accuse_success",
                             player.getName().getString(), targetPlayer.getName().getString()));
                 }
-            } else {
+            } else if (result == GameStateManager.AccuseResult.MISS) {
                 // 指认失败：不显示指认了谁，只显示指认失败（指认者自己 -200 分）
                 for (ServerPlayer p : context.server().getPlayerList().getPlayers()) {
                     p.sendSystemMessage(Component.translatable(
@@ -1433,6 +1446,8 @@ public class NetworkRegistry {
                             player.getName().getString()));
                 }
             }
+            // NULLIFIED（仅剩一名使者 + 纸符契约）与 BOTH_OUT（使者与链接者一同出局，已单独广播）：
+            // 都不再叠加通用的「指认成功/失败」文案（第九十一批）
             NetworkRegistry.broadcastScores(context.server());
         });
 

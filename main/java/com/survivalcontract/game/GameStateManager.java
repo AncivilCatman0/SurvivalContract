@@ -270,6 +270,45 @@ public class GameStateManager {
 		scores.merge(playerId, amount, Integer::sum);
 		broadcastScoreChange(playerId, amount); // 全员可见的加分系统消息
 		checkElimination(playerId); // 神的谎言：分数变动后检查淘汰
+		checkStowawayScoreVictory(playerId); // 走私犯与检察官：率先达标直接获胜
+	}
+
+	/** 走私犯与检察官：率先达到「参战人数 × 300」分的队伍/个人直接获胜（第九十批） */
+	public static final int STOWAWAY_WIN_SCORE_PER_PLAYER = 300;
+
+	/**
+	 * 分数变动后即时判定走私犯与检察官的达标胜利条件：
+	 * 团队模式按队伍总分（队伍合计达到阈值 → 全队获胜），个人模式按个人分数。
+	 * 参战人数取开局初始化的分数表大小（观战者不计入）。
+	 */
+	private void checkStowawayScoreVictory(UUID changed) {
+		if (!isStowaway() || currentPhase != GamePhase.PLAYING) return;
+		int participants = scores.size();
+		if (participants <= 0) return;
+		int threshold = participants * STOWAWAY_WIN_SCORE_PER_PLAYER;
+		List<UUID> winners = new ArrayList<>();
+		String label;
+		if (isTeamMode()) {
+			Team team = getPlayerTeam(changed);
+			if (team != Team.RED && team != Team.BLUE) return;
+			if (getTeamScore(team) < threshold) return;
+			winners.addAll(getTeamMembers(team));
+			label = net.minecraft.network.chat.Component.translatable(
+					team == Team.RED ? "survival-contract.gui.team.red" : "survival-contract.gui.team.blue").getString();
+		} else {
+			// 内部分数（无需经显示钳制）：达标即获胜
+			if (scores.getOrDefault(changed, 0) < threshold) return;
+			winners.add(changed);
+			ServerPlayer p = server == null ? null : server.getPlayerList().getPlayer(changed);
+			label = p != null ? p.getName().getString() : changed.toString().substring(0, 8);
+		}
+		forcedWinners = new ArrayList<>(winners);
+		endGame(null); // 无最终目标：沿用胜者列表广播流程
+		if (server != null) {
+			var msg = net.minecraft.network.chat.Component.translatable(
+					"survival-contract.msg.stowaway_score_victory", label, threshold);
+			for (ServerPlayer p : server.getPlayerList().getPlayers()) p.sendSystemMessage(msg);
+		}
 	}
 
 	// ============ 玩法：神的谎言（GodsLies） ============
@@ -517,38 +556,61 @@ public class GameStateManager {
 		return p != null ? p.getName().getString() : "?";
 	}
 
-	/** 指认结果：命中使者（对方 -200 分）/ 未命中（自己 -200 分）——第六十九批 */
-	public enum AccuseResult { HIT, MISS }
+	/**
+	 * 指认结果：命中使者（对方 -200 分）/ 未命中（自己 -200 分）/ 被纸符契约抵消（无事发生、不公开）/
+	 * 纸符契约「使者与链接者一同出局」（已单独广播，不再叠加指认成功文案）。
+	 * 第九十一批：恢复「仅剩一名使者时纸符抵挡一次指认出局」的第三态，并区分多使者双双出局的第四态。
+	 */
+	public enum AccuseResult { HIT, MISS, NULLIFIED, BOTH_OUT }
 
 	/**
-	 * 平民指认：消耗一次指认权（第六十九批新规则——取消原"最后使者免死"特例，
-	 * 被指认的使者一律 -200 分；分数 ≤ 0 由 checkElimination 自动淘汰出局，
-	 * 分数低于 0 时显示为 0）。
+	 * 平民指认（第九十一批按用户规则重做符纸结算）：
 	 * <ul>
-	 *   <li>未命中（目标非使者）→ 指认者 -200 分</li>
-	 *   <li>命中使者 → 该使者 -200 分；其链接对象自动获得一次神罚（-55 分，
-	 *       已武装纸符神罚免疫的平民被挡下——整体仅消耗指认次数，不扣分）</li>
+	 *   <li>未命中（目标非使者）→ 指认者 -200 分（不扣分豁免：平民纸符不能挡指认失败）</li>
+	 *   <li>命中使者且该使者用纸符绑定了存活的链接者：
+	 *     <ul>
+	 *       <li><b>存活使者 ≥ 2</b> → 使者与链接者<b>一同出局</b>（强制淘汰，纸符神罚免疫不能挡；
+	 *           先双双标记淘汰再统一判定胜负，避免中间态误判）</li>
+	 *       <li><b>存活使者仅 1</b> → 使者<b>抵挡一次指认出局</b>（不扣分、不淘汰、不公开），
+	 *           链接者受到一次神罚（-55，已武装纸符的平民可挡下）</li>
+	 *     </ul>
+	 *   </li>
+	 *   <li>命中使者但没有链接者（未用纸符 / 链接已触发 / 链接者已出局）→ 正常 -200 分，分数 ≤0 淘汰</li>
 	 * </ul>
 	 */
 	public AccuseResult resolveAccusation(UUID accuser, UUID target) {
 		accuseCharges.merge(accuser, -1, Integer::sum);
 		accuseCharges.remove(accuser, 0);
 		if (!isGodEnvoy(target)) {
-			deductScore(accuser, 200); // 指认失败：自己 -200（原为分数清零）
+			deductScore(accuser, 200); // 指认失败：自己 -200（纸符不挡指认失败）
 			return AccuseResult.MISS;
 		}
 		UUID linked = envoyLinks.remove(target); // 链接一次性：触发即清除
-		deductScore(target, 200); // 指认使者成功：对方 -200（不再有免死特例）
 		if (linked != null && !eliminatedPlayers.contains(linked)) {
-			if (relicImmunityArmed.remove(linked)) {
-				// 平民纸符优先级高：神罚被挡下（仅消耗指认次数）
-				sendPrivate(linked, "survival-contract.msg.godslies.link_block");
-				sendPrivate(target, "survival-contract.msg.godslies.link_block_envoy", nameOf(linked));
-			} else {
-				sendPrivate(linked, "survival-contract.msg.godslies.link_punish");
-				deductScore(linked, 55);
+			int aliveEnvoys = 0;
+			for (UUID id : godEnvoys) if (!eliminatedPlayers.contains(id)) aliveEnvoys++;
+			if (aliveEnvoys <= 1) {
+				// 仅剩一名使者：纸符抵挡一次指认出局（不扣分、不淘汰、身份不公开）
+				sendPrivate(target, "survival-contract.msg.godslies.relic_last_guard");
+				if (relicImmunityArmed.remove(linked)) {
+					// 链接者已武装平民纸符：神罚被挡下（仅消耗指认次数）
+					sendPrivate(linked, "survival-contract.msg.godslies.link_block");
+					sendPrivate(target, "survival-contract.msg.godslies.link_block_envoy", nameOf(linked));
+				} else {
+					sendPrivate(linked, "survival-contract.msg.godslies.link_punish");
+					deductScore(linked, 55);
+				}
+				return AccuseResult.NULLIFIED;
 			}
+			// 至少两名使者：契约触发，使者与链接者一同出局（死亡≠神罚，已武装纸符的平民照常出局）
+			forceElimination(target);
+			forceElimination(linked);
+			broadcastGodsLies("survival-contract.msg.godslies.link_both_out",
+					nameOf(target), nameOf(linked));
+			checkGodsLiesWinCondition();
+			return AccuseResult.BOTH_OUT;
 		}
+		deductScore(target, 200); // 普通指认命中：对方 -200，分数 ≤0 淘汰
 		return AccuseResult.HIT;
 	}
 
@@ -634,6 +696,13 @@ public class GameStateManager {
 		if (currentPhase != GamePhase.PLAYING) return;
 		if (!isGodsLies() || playerId == null || eliminatedPlayers.contains(playerId)) return;
 		if (getScore(playerId) > 0) return;
+		forceElimination(playerId);
+	}
+
+	/** 强制淘汰（不看分数）：纸符契约「至少两名使者 → 使者与链接者一同出局」使用（第九十一批） */
+	private void forceElimination(UUID playerId) {
+		if (currentPhase != GamePhase.PLAYING) return;
+		if (!isGodsLies() || playerId == null || eliminatedPlayers.contains(playerId)) return;
 		eliminatedPlayers.add(playerId);
 		net.minecraft.server.level.ServerPlayer p = server != null
 				? server.getPlayerList().getPlayer(playerId) : null;
@@ -951,15 +1020,18 @@ public class GameStateManager {
 	 * 2. 用 ServerLevel.findBestSpawnPosition 找安全落脚 y 坐标
 	 * 3. 画 WorldBorder 限制生存范围（radius 2000）
 	 * 4. 初始化玩家初始分数（从 ChallengeManager.calculateInitialScore）
+	 *
+	 * @return false = 竞技场主世界缺失（绝不允许退回原版主世界，调用方必须中止开局）
 	 */
-	public void setupNewRandomWorld(MinecraftServer server) {
+	public boolean setupNewRandomWorld(MinecraftServer server) {
 		SurvivalContract.LOGGER.info("Setting up PLAYING world...");
 
 		// PLAYING 世界 = 竞技场主世界（每局新建的随机种子维度组）
 		ServerLevel overworld = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
 		if (overworld == null) {
-			SurvivalContract.LOGGER.error("Arena overworld missing! Falling back to vanilla overworld.");
-			overworld = server.overworld();
+			SurvivalContract.LOGGER.error("Arena overworld missing! Aborting PLAYING setup "
+					+ "(refusing to fall back to the vanilla overworld).");
+			return false;
 		}
 
 		// 生成随机 X,Z：出生点 x/z 锁定在 [-300, 300] 区间内（用户要求）
@@ -994,6 +1066,7 @@ public class GameStateManager {
 		}
 
 		SurvivalContract.LOGGER.info("PLAYING world ready!");
+		return true;
 	}
 
 	/**
@@ -1019,7 +1092,7 @@ public class GameStateManager {
 		}
 		SurvivalContract.LOGGER.warn("No perfect surface spawn found, using heightmap fallback (risk of water surface!)");
 		forceLoadChunk(level, x, z);
-		return new BlockPos(x, level.getHeight(SPAWN_HEIGHTMAP, x, z), z);
+		return sanitizeSpawn(level, x, level.getHeight(SPAWN_HEIGHTMAP, x, z), z);
 	}
 
 	private static final net.minecraft.world.level.levelgen.Heightmap.Types SPAWN_HEIGHTMAP =
@@ -1071,16 +1144,32 @@ public class GameStateManager {
 	 *       走私犯与检察官模式间隔 5 区块（80 格，且逐点保证最小间距）</li>
 	 * </ul>
 	 * 每个点均做严格安全落点检查（脚下实心非流体+两格空气）。
+	 * <p>文明时代特殊处理：在 {@code CivilizationManager.setup} 完成疆域划分后由 {@code initClaim}
+	 * 覆盖团队重生点到两个大本营中心（都在 240×240 疆域之内）——因此先分配临时点到疆域中心，
+	 * 避免初始分配落到边界外，然后用 {@code initClaim} 覆盖。</p>
 	 */
 	private void assignRespawnPoints(MinecraftServer server, ServerLevel level) {
 		respawnPoints.clear();
 		List<ServerPlayer> players = new java.util.ArrayList<>(server.getPlayerList().getPlayers());
 		if (isTeamMode()) {
-			BlockPos redBase = findSafeNear(level, playingSpawn.offset(0, 0, 120));
-			// 蓝队点以红队点为锚：只接受与红队点间距 >= 240 的严格安全落点（防止安全搜索漂移缩短间距）
-			BlockPos blueBase = findSafeAtMinDistance(level, redBase.getX(), redBase.getZ() - 240, redBase, 240);
-			SurvivalContract.LOGGER.info("Team respawn points: red={} blue={} (>=240 blocks apart)",
-					redBase, blueBase);
+			BlockPos redBase;
+			BlockPos blueBase;
+			if (isCivilization()) {
+				// 文明时代团队模式：开局先把全队重生点锚定到疆域中心（playingSpawn 就是疆域中心），
+				// 然后 CivilizationManager.initClaim 会把各自队点覆盖到大本营中心（绝对在边界内）
+				// 不会再出现红蓝队点被放到 z±120 → 正好贴到 240×240 边界或越界
+				redBase = playingSpawn;
+				blueBase = playingSpawn;
+				SurvivalContract.LOGGER.info("Civilization team spawns: temporary center {} "
+						+ "(will be overridden by HQ init)", playingSpawn);
+			} else {
+				// 普通团队模式：保持原逻辑（红+120z，蓝-240z）
+				redBase = findSafeNear(level, playingSpawn.offset(0, 0, 120));
+				// 蓝队点以红队点为锚：只接受与红队点间距 >= 240 的严格安全落点（防止安全搜索漂移缩短间距）
+				blueBase = findSafeAtMinDistance(level, redBase.getX(), redBase.getZ() - 240, redBase, 240);
+				SurvivalContract.LOGGER.info("Team respawn points: red={} blue={} (>=240 blocks apart)",
+						redBase, blueBase);
+			}
 			for (ServerPlayer p : players) {
 				if (isLobbySpectator(p.getUUID())) continue;
 				Team t = getPlayerTeam(p.getUUID());
@@ -1111,7 +1200,8 @@ public class GameStateManager {
 		BlockPos found = searchNear(level, base.getX(), base.getZ(), 64, 8);
 		if (found != null) return found;
 		forceLoadChunk(level, base.getX(), base.getZ());
-		return new BlockPos(base.getX(), level.getHeight(SPAWN_HEIGHTMAP, base.getX(), base.getZ()), base.getZ());
+		return sanitizeSpawn(level, base.getX(),
+				level.getHeight(SPAWN_HEIGHTMAP, base.getX(), base.getZ()), base.getZ());
 	}
 
 	/**
@@ -1126,7 +1216,31 @@ public class GameStateManager {
 		if (found != null) return found;
 		SurvivalContract.LOGGER.warn("No safe team point >= {} from {} near ({},{}), heightmap fallback", minDist, anchor, x, z);
 		forceLoadChunk(level, x, z);
-		return new BlockPos(x, level.getHeight(SPAWN_HEIGHTMAP, x, z), z);
+		return sanitizeSpawn(level, x, level.getHeight(SPAWN_HEIGHTMAP, x, z), z);
+	}
+
+	/**
+	 * 兜底落点修正：把候选坐标调整成"脚下实心非流体 + 脚/头两格空气"的安全落点。
+	 * <p>历史上所有兜底路径都直接返回 heightmap（未生成区块为 0/-64）——在 MINER/SNOW/DESERT
+	 * 超平坦（地表 y=23/39）里会把玩家埋进石头或直接送进虚空。这里逐级修正：
+	 * 原地向上找 → 向下找 → 16 格环边搜索 → 最后取地表高度（至少不会低于世界底部）。</p>
+	 */
+	private static BlockPos sanitizeSpawn(ServerLevel level, int x, int y, int z) {
+		forceLoadChunk(level, x, z);
+		int minY = level.getMinY() + 2;
+		int maxY = level.getMaxY() - 2;
+		y = Math.max(minY, Math.min(maxY, y));
+		for (int yy = y; yy <= maxY; yy++) {
+			if (isSafeSurface(level, x, yy, z)) return new BlockPos(x, yy, z);
+		}
+		for (int yy = y - 1; yy >= minY; yy--) {
+			if (isSafeSurface(level, x, yy, z)) return new BlockPos(x, yy, z);
+		}
+		BlockPos near = searchNear(level, x, z, 16, 4);
+		if (near != null) return near;
+		int h = level.getHeight(SPAWN_HEIGHTMAP, x, z);
+		SurvivalContract.LOGGER.warn("sanitizeSpawn: no safe spot near ({},{}), fallback y={}", x, z, h);
+		return new BlockPos(x, Math.max(minY, h), z);
 	}
 
 	/** 同 {@link #searchNear}，额外要求候选点与 anchor 的二维距离 >= minDist */

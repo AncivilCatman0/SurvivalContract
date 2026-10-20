@@ -89,6 +89,31 @@ public class MainEventListener {
 	// FINISHED 后等待多少 tick 才回大厅（5 秒 = 100 tick）
 	private static int FINISHED_COUNTDOWN = -1;
 
+	// tick 异常限流：子系统名 → 上次打印异常的服务端 tick（同类异常 200 tick 内不重复刷屏）
+	private static final Map<String, Long> TICK_ERROR_LOGGED_AT = new HashMap<>();
+
+	/**
+	 * 单个子系统隔离：子系统内部抛异常只记日志，不击穿整个服务端 tick。
+	 * （之前任一子系统异常都会让服务端 tick 直接抛出 → 服务器卡死/玩家被踢，整局无法继续）
+	 */
+	private static void tickSafely(String name, Runnable action) {
+		try {
+			action.run();
+		} catch (Throwable t) {
+			logTickError(name, t);
+		}
+	}
+
+	private static void logTickError(String name, Throwable t) {
+		MinecraftServer server = GameStateManager.getInstance().getServer();
+		long now = server == null ? 0L : server.getTickCount();
+		Long last = TICK_ERROR_LOGGED_AT.get(name);
+		if (last != null && now >= last && now - last < 200) return;
+		TICK_ERROR_LOGGED_AT.put(name, now);
+		SurvivalContract.LOGGER.error("[TickGuard] {} failed at tick {} (further identical errors suppressed for 200 ticks)",
+				name, now, t);
+	}
+
 	// 已见过的 WitherBoss 实体（避免重复触发凋零山庄 WIN）
 	private static final Set<UUID> seenWithers = new HashSet<>();
 	// 一本万利：猪灵交易冷却（piglin UUID → 该猪灵下次可交易的游戏刻），防长按右键连刷金锭
@@ -404,6 +429,7 @@ public class MainEventListener {
 		// ============ 新实体生成：检测凋零被召唤 ============
 		// 用 tick 扫描新生成的 WitherBoss（迷彩/赤月走上方 ENTITY_LOAD 直挂）
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			try {
 			GameStateManager gsm = GameStateManager.getInstance();
 			if (gsm.getCurrentPhase() != GameStateManager.GamePhase.PLAYING) return;
 			if (gsm.getCurrentFinalGoal() != GameStateManager.FinalGoal.WITHER) return;
@@ -425,6 +451,9 @@ public class MainEventListener {
 						return;
 					}
 				}
+			}
+			} catch (Throwable t) {
+				logTickError("wither-check", t);
 			}
 		});
 
@@ -456,6 +485,7 @@ public class MainEventListener {
 
 	// ============ 玩家进入末地：结束了 目标 ============
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			try {
 			GameStateManager gsm = GameStateManager.getInstance();
 			if (gsm.getCurrentPhase() != GameStateManager.GamePhase.PLAYING) return;
 			if (gsm.getCurrentFinalGoal() != GameStateManager.FinalGoal.ENDER_END) return;
@@ -469,10 +499,16 @@ public class MainEventListener {
 					break;
 				}
 			}
+			} catch (Throwable t) {
+				logTickError("ender-end-check", t);
+			}
 		});
 
 		// ============ SERVER TICK ============
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			// 整段兜底：任何一个未预料的异常都不允许抛回服务端主循环
+			// （抛出去会让本次 tick 中断、后续子系统全部停摆，严重时服务端直接崩溃）
+			try {
 			GameStateManager gsm = GameStateManager.getInstance();
 
 			// --- 贫瘠铁矿延迟结算（本 tick 末尾：掉落实体必已生成） ---
@@ -498,7 +534,7 @@ public class MainEventListener {
 				if (FINISHED_COUNTDOWN == -1) {
 					// 第一次进入 FINISHED → 通知附属玩法（清理自己的运行时状态）
 					com.survivalcontract.api.ScPlayStyleProvider addonEnding = gsm.getAddonProvider();
-					if (addonEnding != null) addonEnding.onGameEnd(server);
+					if (addonEnding != null) tickSafely("addon-end", () -> addonEnding.onGameEnd(server));
 					// 立即清掉 Boss 血条（凋灵/末影龙/事件预警条）
 					clearVanillaBossBars(server);
 					// 全体切观察者 + 广播 + 开始倒计时（经验升级提示音标记游戏结束）
@@ -519,7 +555,7 @@ public class MainEventListener {
 					FINISHED_COUNTDOWN--;
 				} else {
 					// 倒计时归零 → reset + 回大厅
-					performResetForLobby(server, gsm);
+						tickSafely("reset-to-lobby", () -> performResetForLobby(server, gsm));
 				}
 				return; // FINISHED 阶段不跑下面的 PLAYING/LOBBY tick
 			} else {
@@ -528,7 +564,7 @@ public class MainEventListener {
 
 			// --- 附属玩法：每 tick 钩子（套餐倒计时/交付检测等由附属模组实现） ---
 			com.survivalcontract.api.ScPlayStyleProvider addonTick = gsm.getAddonProvider();
-			if (addonTick != null) addonTick.onServerTick(server);
+			if (addonTick != null) tickSafely("addon-tick", () -> addonTick.onServerTick(server));
 
 			// --- PLAYING 阶段死亡挑战检测 ---
 			if (gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING) {
@@ -831,12 +867,16 @@ public class MainEventListener {
 			// --- Lobby phase buffs ---
 			if (com.survivalcontract.dimension.LobbyMode.isActive()
 					&& gsm.getCurrentPhase() == GameStateManager.GamePhase.LOBBY) {
-				// 大厅虚空保护：仅大厅维度，掉到 y < -64（掉出地图）→ 传送回大厅出生点（不影响其它维度）
-				for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-					if (player.level() == com.survivalcontract.dimension.LobbyManager.getInstance().getLobbyLevel()
-							&& player.getY() < -64) {
-						com.survivalcontract.dimension.LobbyManager.getInstance().teleportToLobby(player);
-						player.sendSystemMessage(Component.translatable("survival-contract.msg.lobby_void_return"));
+				// 大厅虚空保护：仅自定义大厅维度，掉到 y < -64（掉出地图）→ 传送回大厅出生点
+				// 回退主世界时不做（否则玩家在主世界正常挖矿到 -64 以下会被莫名拉回地表）
+				var lobbyLevel = com.survivalcontract.dimension.LobbyManager.getInstance().getLobbyLevel();
+				boolean customLobby = lobbyLevel != null && lobbyLevel != server.overworld();
+				if (customLobby) {
+					for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+						if (player.level() == lobbyLevel && player.getY() < -64) {
+							com.survivalcontract.dimension.LobbyManager.getInstance().teleportToLobby(player);
+							player.sendSystemMessage(Component.translatable("survival-contract.msg.lobby_void_return"));
+						}
 					}
 				}
 				// 状态同步每 2 秒一次即可（每 tick 发会导致客户端 GUI 每秒重建 20 次，
@@ -859,7 +899,8 @@ public class MainEventListener {
 			if (gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING) {
 
 				// 排队中的全屏大字（神的谎言开局身份提示，延迟到倒计时后弹出）
-				com.survivalcontract.dimension.LobbyManager.getInstance().tickPendingTitles(server);
+				tickSafely("pending-titles",
+						() -> com.survivalcontract.dimension.LobbyManager.getInstance().tickPendingTitles(server));
 
 				// 旁观者保持（仅限游戏加入的旁观者）：
 				// - 参战者在对局中可自由切换观察者模式——不再强制拉回生存/送回重生点（用户要求解除该限制）
@@ -937,7 +978,8 @@ public class MainEventListener {
 				boolean nightVision = gsm.isRuleActive("rule_night_vision");
 				for (ServerPlayer player : server.getPlayerList().getPlayers()) {
 					// 职业特权每 tick 结算：矿工急迫 / 斥候削弱反转（移速·跳跃·氧气）/ 大厨·斗士进食结算
-					ProfessionManager.getInstance().tickPerks(player, server.getTickCount());
+					tickSafely("profession-perks",
+							() -> ProfessionManager.getInstance().tickPerks(player, server.getTickCount()));
 					// 全局夜视规则
 					if (nightVision && !player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION)) {
 					player.addEffect(new MobEffectInstance(
@@ -945,12 +987,13 @@ public class MainEventListener {
 							true, false, false));
 					}
 				}
-				RandomEventManager.getInstance().tick(server);
-				TaskManager.getInstance().tick(server);
+				tickSafely("random-events", () -> RandomEventManager.getInstance().tick(server));
+				tickSafely("tasks", () -> TaskManager.getInstance().tick(server));
 				// 走私犯与检察官：批次更换 / 待执行检查判定
-				com.survivalcontract.smuggle.SmuggleManager.getInstance().tick(server);
+				tickSafely("smuggle", () -> com.survivalcontract.smuggle.SmuggleManager.getInstance().tick(server));
 				// 文明时代：占领计时 / 资源产出
-				com.survivalcontract.civilization.CivilizationManager.getInstance().tick(server);
+				tickSafely("civilization",
+						() -> com.survivalcontract.civilization.CivilizationManager.getInstance().tick(server));
 
 				// 竞技场防逃跑扫描：PLAYING 中任何玩家落到竞技场维度组之外
 				//（原版回退路径/传送门漏洞）→ 每 2 秒扫一次，送回竞技场
@@ -986,6 +1029,9 @@ public class MainEventListener {
 						gsm.endGame(GameStateManager.FinalGoal.WITHER); // timeout 用 WITHER 作默认终止标记
 					}
 				}
+			}
+			} catch (Throwable t) {
+				logTickError("server-tick", t);
 			}
 		});
 
@@ -1556,7 +1602,13 @@ public class MainEventListener {
 			}
 		}
 		ServerLevel arena = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (arena == null) arena = server.overworld(); // 兜底（正常不触发）
+		if (arena == null) {
+			// 竞技场缺失时绝不退回原版主世界：否则玩家会被丢进"其他世界"，
+			// 配合每 2 秒的防逃跑扫描还会反复传送。保持原地并报错（开局失败提示引导重开）
+			SurvivalContract.LOGGER.error("Arena teleport skipped for {}: arena overworld missing",
+					player.getName().getString());
+			return;
+		}
 		BlockPos spawn = gsm.getPlayingSpawn();
 		player.setGameMode(GameType.SPECTATOR);
 		player.teleportTo(arena, spawn.getX() + 0.5, spawn.getY() + 2.0, spawn.getZ() + 0.5,
@@ -1576,7 +1628,13 @@ public class MainEventListener {
 		MinecraftServer server = player.level().getServer();
 		if (server == null) return;
 		ServerLevel arena = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (arena == null) arena = server.overworld(); // 兜底（正常不触发）
+		if (arena == null) {
+			// 竞技场缺失时绝不退回原版主世界：否则玩家会被丢进"其他世界"，
+			// 配合每 2 秒的防逃跑扫描还会反复传送。保持原地并报错（开局失败提示引导重开）
+			SurvivalContract.LOGGER.error("Arena teleport skipped for {}: arena overworld missing",
+					player.getName().getString());
+			return;
+		}
 
 		// 神的谎言：已被淘汰的玩家保持旁观者模式（重生/防逃跑流程不得拉回生存）
 		if (gsm.isGodsLies() && gsm.isEliminated(player.getUUID())) {
@@ -2708,6 +2766,12 @@ public class MainEventListener {
 
 		// 所有药水效果（buff）
 		player.removeAllEffects();
+
+		// 经验槽（等级 / 进度 / 总经验）一并清零：对局中获得的等级与经验不随物品栏清空，
+		// 否则回大厅后经验槽仍残留上一局进度（第九十一批）
+		player.experienceLevel = 0;
+		player.experienceProgress = 0.0f;
+		player.totalExperience = 0;
 
 		// 成就（进度）全部撤销：以提升权限的命令源执行原版 advancement 指令
 		try {

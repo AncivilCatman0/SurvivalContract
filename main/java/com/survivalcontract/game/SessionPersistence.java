@@ -14,8 +14,11 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 
+import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
@@ -53,9 +56,32 @@ public final class SessionPersistence {
 			if (server == null) return;
 			CompoundTag root = new CompoundTag();
 			immunities.forEach((id, v) -> root.putInt(id.toString(), v));
-			NbtIo.writeCompressed(root, immunityPath(server));
+			writeAtomic(root, immunityPath(server));
 		} catch (Exception e) {
 			SurvivalContract.LOGGER.error("[Session] Failed to save victory immunities", e);
+		}
+	}
+
+	/**
+	 * 原子落盘：先写同目录 {@code .tmp}，再整体替换目标文件。
+	 *
+	 * <p>直接写目标文件时，若进程在写入途中崩溃/断电，会把快照写成半个 NBT——
+	 * 下次启动读取必然抛异常。原子写保证目标文件要么是旧版本、要么是新版本，不会出现半截。</p>
+	 */
+	private static void writeAtomic(CompoundTag root, Path target) throws IOException {
+		Path tmp = target.resolveSibling(target.getFileName().toString() + ".tmp");
+		Files.createDirectories(target.getParent());
+		try {
+			NbtIo.writeCompressed(root, tmp);
+			try {
+				Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+			} catch (AtomicMoveNotSupportedException e) {
+				Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+			}
+		} finally {
+			try {
+				Files.deleteIfExists(tmp);
+			} catch (IOException ignored) {}
 		}
 	}
 
@@ -91,7 +117,13 @@ public final class SessionPersistence {
 			CompoundTag root = new CompoundTag();
 			root.putString("phase", gsm.getCurrentPhase().name());
 			root.putString("gameMode", gsm.getGameMode().name());
-			root.putString("finalGoal", gsm.getCurrentFinalGoal().name());
+			// 文明时代/神的谎言/走私犯/附属玩法没有最终目标（开局置 null）——
+			// 旧实现直接 name() 会 NPE，导致这些玩法退出时永远写不出快照（第八十七批）
+			root.putString("finalGoal", gsm.getCurrentFinalGoal() == null ? "" : gsm.getCurrentFinalGoal().name());
+			// 玩法（重启后 GameStateManager 是新实例，默认 NORMAL；不保存会导致
+			// 文明时代重进时按原版主世界建竞技场 → 四种地形预设全部变成"主世界"）
+			root.putString("playStyle", gsm.getPlayStyle().name());
+			root.putString("addonStyleId", gsm.getAddonStyleId() == null ? "" : gsm.getAddonStyleId());
 			root.putInt("gameDurationMinutes", gsm.getGameDurationMinutes());
 			// gameStartTime 是绝对的 tickCount，重启后归零 → 存相对偏移
 			root.putLong("gameStartOffset", gsm.getGameStartTime() - server.getTickCount());
@@ -186,7 +218,7 @@ public final class SessionPersistence {
 			root.put("eventIntervals", intervals);
 			root.putInt("deathPenalty", gsm.getDeathPenalty());
 
-			NbtIo.writeCompressed(root, filePath(server));
+			writeAtomic(root, filePath(server));
 			SurvivalContract.LOGGER.info("[Session] Saved in-progress session (phase={}, seed={})",
 					gsm.getCurrentPhase(), ArenaWorldManager.currentSeed());
 		} catch (Exception e) {
@@ -212,9 +244,27 @@ public final class SessionPersistence {
 
 			GameStateManager gsm = GameStateManager.getInstance();
 			long seed = root.getLongOr("arenaSeed", 0L);
+			String styleName = root.getStringOr("playStyle", "NORMAL");
+			// 文明时代 / 附属玩法：运行时状态（疆域占领、大本营实体、固定地图进度）没有持久化，
+			// 强行恢复只会得到一个没有疆域/边界的"假对局"（玩家被传到边界外、掉进虚空）。
+			// 这类会话统一回大厅重开（第八十七批）
+			if ("CIVILIZATION".equals(styleName) || "ADDON".equals(styleName)) {
+				SurvivalContract.LOGGER.info("[Session] Play style {} cannot be restored across restarts, returning to LOBBY",
+						styleName);
+				clear(server);
+				return false;
+			}
 			// 先清运行态（clearRuntimeState 会把地形预设重置为默认），随后再从快照恢复预设——
 			// 若顺序颠倒，恢复出的预设会被 clearRuntimeState 重置回主世界（第五十八批）
 			gsm.clearRuntimeState();
+
+			// 玩法必须在重建竞技场维度前恢复：ArenaWorldManager.buildArenaLevels 用
+			// isCivilization() 决定用自定义地形生成器还是原版主世界生成器（第八十七批）
+			try {
+				gsm.setPlayStyle(GameStateManager.PlayStyle.valueOf(styleName));
+				String addonId = root.getStringOr("addonStyleId", "");
+				if (!addonId.isEmpty()) gsm.setAddonStyleId(addonId);
+			} catch (IllegalArgumentException ignored) {}
 
 			// 自定义地形预设：必须在重建竞技场维度前恢复（建维度时按预设选生成器——第四十九批）
 			try {
@@ -223,9 +273,12 @@ public final class SessionPersistence {
 			} catch (IllegalArgumentException ignored) {}
 
 			// 先把竞技场维度按原种子重建（不删档）——失败则整体回退到大厅
-			ArenaWorldManager.restoreArenaWorlds(server, seed);
+			if (!ArenaWorldManager.restoreArenaWorlds(server, seed)) {
+				throw new IllegalStateException("Failed to rebuild arena worlds from saved seed " + seed);
+			}
 			gsm.setGameMode(GameStateManager.GameMode.valueOf(root.getStringOr("gameMode", "SOLO")));
-			gsm.setCurrentFinalGoal(GameStateManager.FinalGoal.valueOf(root.getStringOr("finalGoal", "ENDER_DRAGON")));
+			String goalName = root.getStringOr("finalGoal", "");
+			gsm.setCurrentFinalGoal(goalName.isEmpty() ? null : GameStateManager.FinalGoal.valueOf(goalName));
 			gsm.setGameDurationMinutes(root.getIntOr("gameDurationMinutes", 120));
 			gsm.setGameStartTime(server.getTickCount() + root.getLongOr("gameStartOffset", 0L));
 			gsm.setPlayingBorderRadius(root.getIntOr("playingBorderRadius", 2000));
@@ -319,13 +372,34 @@ public final class SessionPersistence {
 					seed, gsm.getPlayingSpawn());
 			return true;
 		} catch (Exception e) {
-			SurvivalContract.LOGGER.error("[Session] Failed to restore session, falling back to LOBBY", e);
+			SurvivalContract.LOGGER.error("[Session] Failed to restore session, falling back to LOBBY "
+					+ "(arena saves are kept untouched)", e);
+			// 注意：这里绝不能调用 ArenaWorldManager.teardownArenaWorlds——
+			// 恢复失败并不代表磁盘上的竞技场存档坏了，删掉会把玩家整局的建造/破坏全部清零（第八十九批）
 			try {
-				GameStateManager.getInstance().setCurrentPhase(GameStateManager.GamePhase.LOBBY);
-				ArenaWorldManager.teardownArenaWorlds(server);
+				GameStateManager gsm = GameStateManager.getInstance();
+				gsm.clearRuntimeState();
+				gsm.setPlayStyle(GameStateManager.PlayStyle.NORMAL);
+				gsm.setCurrentFinalGoal(null);
+				gsm.setCurrentPhase(GameStateManager.GamePhase.LOBBY);
 			} catch (Exception ignored) {}
-			clear(server);
+			quarantine(server);
 			return false;
+		}
+	}
+
+	/** 把无法解析的快照改名隔离（保留现场供排查，同时避免每次启动都重复读取失败） */
+	private static void quarantine(MinecraftServer server) {
+		try {
+			Path path = filePath(server);
+			if (!Files.exists(path)) return;
+			Path bad = path.resolveSibling(FILE_NAME + ".corrupt");
+			Files.deleteIfExists(bad);
+			Files.move(path, bad, StandardCopyOption.REPLACE_EXISTING);
+			SurvivalContract.LOGGER.warn("[Session] Corrupt session snapshot moved to {}", bad);
+		} catch (Exception e) {
+			SurvivalContract.LOGGER.warn("[Session] Failed to quarantine corrupt snapshot: {}", e.getMessage());
+			clear(server);
 		}
 	}
 

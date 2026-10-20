@@ -110,15 +110,35 @@ public class ArenaWorldManager {
 	/**
 	 * 开始新游戏：创建全新随机种子的竞技场维度组。
 	 * 必须在 {@code setupNewRandomWorld} 之前调用（出生点搜索需要竞技场主世界）。
+	 *
+	 * @return false = 旧档未能删除（旧区块会被新预设"复用"，任何地形预设都不会生效）
+	 *         或维度注册失败——调用方必须中止开局，绝不能把玩家放进原版主世界
 	 */
-	public static void createArenaWorlds(MinecraftServer server) {
+	public static boolean createArenaWorlds(MinecraftServer server) {
 		// 1) 清掉上一局残留（包括上次服务器崩溃遗留的存档文件夹）
 		removeArenaLevels(server);
+		// 1.1) 删档校验：Windows 下句柄释放有延迟，删不掉时新维度会直接复用旧区块
+		//      → 玩家无论选哪种地形预设看到的都是上一局的地形（"四种预设都是主世界"根因之一）
+		LevelStorageSource.LevelStorageAccess storage = ((MinecraftServerAccessor) server).sc$getStorageSource();
+		for (ResourceKey<Level> key : ARENA_KEYS) {
+			Path dir = storage.getDimensionPath(key);
+			if (Files.exists(dir)) {
+				SurvivalContract.LOGGER.error("[Arena] Arena save folder still exists after cleanup: {} "
+						+ "—— 中止开局（旧区块会让地形预设失效）", dir);
+				return false;
+			}
+		}
 
 		// 2) 每局保证不同的随机种子
 		currentSeed = UUID.randomUUID().getMostSignificantBits() ^ System.nanoTime();
 		SurvivalContract.LOGGER.info("[Arena] Creating arena worlds with random seed: {}", currentSeed);
-		buildArenaLevels(server, currentSeed);
+		boolean built = buildArenaLevels(server, currentSeed);
+		if (!built) {
+			// 构造中途失败可能已生成部分维度文件夹；不清掉会让下一局一直卡在「旧档未删除」
+			removeArenaLevels(server);
+			currentSeed = 0;
+		}
+		return built;
 	}
 
 	/**
@@ -126,21 +146,20 @@ public class ArenaWorldManager {
 	 * 单人存档退出重进时，磁盘上的 dimensions/survival-contract/arena* 仍在，
 	 * 用相同种子重建后区块数据与玩家建造/破坏完全延续。
 	 */
-	public static void restoreArenaWorlds(MinecraftServer server, long seed) {
+	public static boolean restoreArenaWorlds(MinecraftServer server, long seed) {
 		if (seed == 0) {
 			SurvivalContract.LOGGER.warn("[Arena] restoreArenaWorlds called with seed 0, falling back to new random seed");
-			createArenaWorlds(server);
-			return;
+			return createArenaWorlds(server);
 		}
 		// 只清掉内存中的残留引用（不删档）
 		removeArenaLevelsFromRegistryOnly(server);
 		currentSeed = seed;
 		SurvivalContract.LOGGER.info("[Arena] Restoring arena worlds from saved seed: {} (save kept)", seed);
-		buildArenaLevels(server, seed);
+		return buildArenaLevels(server, seed);
 	}
 
-	/** 用指定种子构造并注册竞技场三维度（不含删档逻辑） */
-	private static void buildArenaLevels(MinecraftServer server, long seed) {
+	/** 用指定种子构造并注册竞技场三维度（不含删档逻辑）；返回三维度是否全部注册成功 */
+	private static boolean buildArenaLevels(MinecraftServer server, long seed) {
 		long obfSeed = BiomeManager.obfuscateSeed(seed);
 
 		// 3) 拷贝原版三个 LevelStem（维度类型 + 区块生成器，无需 JSON 定义）
@@ -157,26 +176,37 @@ public class ArenaWorldManager {
 		LevelStorageSource.LevelStorageAccess storage = ((MinecraftServerAccessor) server).sc$getStorageSource();
 		Map<ResourceKey<Level>, ServerLevel> levels = ((MinecraftServerAccessor) server).sc$getLevels();
 
+		ServerLevel arena;
+		ServerLevel nether;
+		ServerLevel end;
 		// 4) 按原版 createLevels 的方式构造三个维度
 		//    tickTime=false：DerivedLevelData 与真主世界共享时钟，避免双重推进 dayTime
 		List<CustomSpawner> overworldSpawners = List.of(
 				new PhantomSpawner(), new PatrolSpawner(), new CatSpawner(),
 				new VillageSiege(), new WanderingTraderSpawner(server.getDataStorage()));
 
-		ServerLevel arena = new ServerLevel(server, executor, storage,
-				new DerivedLevelData(server.getWorldData(), overworldData),
-				ARENA, owStem, false, obfSeed, overworldSpawners, false);
-		levels.put(ARENA, arena);
+		// 构造失败必须整体回滚：否则会留下"部分注册"的维度（例如只有主世界没有下界），
+		// 后续传送/传送门都会指向空维度，且下一次开局会误以为维度已存在（第八十九批）
+		try {
+			arena = new ServerLevel(server, executor, storage,
+					new DerivedLevelData(server.getWorldData(), overworldData),
+					ARENA, owStem, false, obfSeed, overworldSpawners, false);
+			levels.put(ARENA, arena);
 
-		ServerLevel nether = new ServerLevel(server, executor, storage,
-				new DerivedLevelData(server.getWorldData(), overworldData),
-				ARENA_NETHER, netherStem, false, obfSeed, List.of(), false);
-		levels.put(ARENA_NETHER, nether);
+			nether = new ServerLevel(server, executor, storage,
+					new DerivedLevelData(server.getWorldData(), overworldData),
+					ARENA_NETHER, netherStem, false, obfSeed, List.of(), false);
+			levels.put(ARENA_NETHER, nether);
 
-		ServerLevel end = new ServerLevel(server, executor, storage,
-				new DerivedLevelData(server.getWorldData(), overworldData),
-				ARENA_END, endStem, false, obfSeed, List.of(), false);
-		levels.put(ARENA_END, end);
+			end = new ServerLevel(server, executor, storage,
+					new DerivedLevelData(server.getWorldData(), overworldData),
+					ARENA_END, endStem, false, obfSeed, List.of(), false);
+			levels.put(ARENA_END, end);
+		} catch (Exception e) {
+			SurvivalContract.LOGGER.error("[Arena] Failed to construct arena levels, rolling back", e);
+			removeArenaLevelsFromRegistryOnly(server);
+			return false;
+		}
 
 		// 5) 龙战：ServerLevel 构造器检测到末地维度类型 hasEnderDragonFight() 已自动创建
 		//    全新 EnderDragonFight（数据在竞技场末地自己的存档文件夹里，删档即重置）
@@ -188,6 +218,17 @@ public class ArenaWorldManager {
 		}
 
 		SurvivalContract.LOGGER.info("[Arena] Arena worlds ready: {}, {}, {} (seed={})", ARENA, ARENA_NETHER, ARENA_END, seed);
+
+		// 7) 注册校验：三维度必须全部可解析，否则调用方要中止开局（禁止退回原版主世界）
+		boolean ok = server.getLevel(ARENA) != null && server.getLevel(ARENA_NETHER) != null
+				&& server.getLevel(ARENA_END) != null;
+		if (!ok) {
+			SurvivalContract.LOGGER.error("[Arena] Arena worlds registration incomplete "
+					+ "(arena={}, nether={}, end={})",
+					server.getLevel(ARENA) != null, server.getLevel(ARENA_NETHER) != null,
+					server.getLevel(ARENA_END) != null);
+		}
+		return ok;
 	}
 
 	/**

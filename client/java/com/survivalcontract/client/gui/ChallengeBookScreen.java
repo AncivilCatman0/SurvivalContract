@@ -952,7 +952,7 @@ public class ChallengeBookScreen extends Screen {
                             "survival-contract.gui.godslies.hidden_desc", "§7所有规则与奇遇事件已隐藏且不可自选"),
                     com.survivalcontract.client.ClientL10n.tr(
                             "survival-contract.gui.godslies.hidden_desc2",
-                            "§7系统已为每位玩家随机分配总分恰好 §f120 §7分的规则——§c开局后也不可查看"),
+                            "§7系统已为每位玩家随机分配总分恰好 §f100 §7分的规则——§c开局后也不可查看"),
                     com.survivalcontract.client.ClientL10n.tr(
                             "survival-contract.gui.godslies.hidden_desc3",
                             "§5玩家中隐藏着「神的使者」——他们免疫所有规则，完成任务可指定玩家扣 55 分")

@@ -63,7 +63,8 @@ import java.util.UUID;
  *       检察官超时未定夺 → 系统自动视为受贿。检查结束（含超时）双方传送回原位；
  *       被检查者物品栏中的散装价值物品在结算时一并兑换成分（杂物与过轮走私品保留不动，第六十七批）。
  *       检查发起书有 2 分钟冷却，且不能连续两次选择同一位玩家作为自己的检察官。同一时间只能进行一场检查</li>
- *   <li><b>胜负</b>：无最终目标，时间结束分数高者获胜</li>
+ *   <li><b>胜负</b>：无最终目标；率先达到「参战人数 × 300」分的队伍/个人直接获胜（第九十批），
+ *       否则时间结束分数高者获胜</li>
  * </ol>
  * 组键（group key）：团队模式 "RED"/"BLUE"（队共享），个人模式玩家 UUID 字符串（独立）。
  */
@@ -206,7 +207,12 @@ public class SmuggleManager {
 		serverRef = server;
 		GameStateManager gsm = GameStateManager.getInstance();
 		ServerLevel level = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (level == null) level = server.overworld();
+		if (level == null) {
+			// 绝不退回原版主世界：否则走私犯小屋会建在大厅/主世界（"掉进其他世界"的同类隐患）
+			SurvivalContract.LOGGER.error("[Smuggle] Setup aborted: arena overworld missing "
+					+ "(refusing to build the cabin in the vanilla overworld).");
+			return;
+		}
 		batchStartTick = server.getTickCount();
 
 		// 收集组键：团队模式每队一组，个人模式每人一组
@@ -476,6 +482,30 @@ public class SmuggleManager {
 			if (!s.isEmpty() && !isSmuggleItem(s.getItem())) total += publicValueOf(s.getItem()) * s.getCount();
 		}
 		return total;
+	}
+
+	/**
+	 * 受贿结算时若被检查者仍开着贿赂袋界面：把光标上拿着的物品计价并清空，然后关闭界面。
+	 * 否则结算瞬间「手里拎着」的物品既不在容器里（不计分）、也不会被 clearContent 清掉，
+	 * 表现为偶发的「袋里明明有货，受贿却没加分、袋里还剩东西」（第九十批）。
+	 *
+	 * @return 光标上贿赂物品的静态分值（走私品不计价）
+	 */
+	private int takeBribeBagCursor(ServerPlayer player) {
+		try {
+			if (!(player.containerMenu instanceof net.minecraft.world.inventory.ChestMenu cm)) return 0;
+			if (!(cm.getSlot(0).container instanceof BribeBagContainer)) return 0;
+			ItemStack carried = cm.getCarried();
+			int value = 0;
+			if (!carried.isEmpty() && !isSmuggleItem(carried.getItem())) {
+				value = publicValueOf(carried.getItem()) * carried.getCount();
+			}
+			cm.setCarried(ItemStack.EMPTY);
+			player.closeContainer();
+			return value;
+		} catch (Exception e) {
+			return 0;
+		}
 	}
 
 	/**
@@ -855,8 +885,15 @@ public class SmuggleManager {
 		GameStateManager gsm = GameStateManager.getInstance();
 		ServerPlayer prosecutor = server.getPlayerList().getPlayer(pp.prosecutor());
 		ServerPlayer initiator = server.getPlayerList().getPlayer(pp.initiator());
+		// 结算前再倒一次收纳袋内嵌内容（玩家可能在进室后往袋道具里塞了物品）并把光标上拿着的物品一并计入，
+		// 否则会出现「袋里明明有货，受贿却 0 分且没清空」的偶发问题（第九十批）
+		int cursorBribe = 0;
+		if (initiator != null) {
+			spillVanillaBundleContents(initiator);
+			cursorBribe = takeBribeBagCursor(initiator);
+		}
 		SimpleContainer bribeBag = bribeBags.get(pp.initiator());
-		int bribe = bribeBagValue(bribeBag);
+		int bribe = bribeBagValue(bribeBag) + cursorBribe;
 		if (bribeBag != null) bribeBag.clearContent();
 		gsm.addScore(pp.prosecutor(), bribe);
 		int bagGain = initiator == null ? 0 : redeemValueBag(initiator);
@@ -925,6 +962,8 @@ public class SmuggleManager {
 		GameStateManager gsm = GameStateManager.getInstance();
 		ServerPlayer prosecutor = server.getPlayerList().getPlayer(pp.prosecutor());
 		ServerPlayer initiator = server.getPlayerList().getPlayer(pp.initiator());
+		// 结算前再倒一次收纳袋内嵌内容（玩家可能在进室后往袋道具里塞了物品），否则价值袋同样会漏计（第九十批）
+		if (initiator != null) spillVanillaBundleContents(initiator);
 		if (!hasSmuggleGood(initiator)) {
 			// 情况一：对面没有走私品
 			int goods = goodsTotal(initiator);

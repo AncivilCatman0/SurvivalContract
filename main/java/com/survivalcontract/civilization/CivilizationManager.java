@@ -390,7 +390,13 @@ public class CivilizationManager {
 		loadRecyclePrices(tradeCfg);
 		GameStateManager gsm = GameStateManager.getInstance();
 		ServerLevel level = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (level == null) level = server.overworld();
+		if (level == null) {
+			// 绝不允许退回原版主世界：否则会给大厅世界套上 240×240 边界、锁掉昼夜/生物破坏，
+			// 并把大本营/商人/守护怪刷在主世界（玩家"在边界外面/掉进其他世界"的根因之一）
+			SurvivalContract.LOGGER.error("[Civilization] Setup aborted: arena overworld missing "
+					+ "(refusing to build the civilization domain in the vanilla overworld).");
+			return;
+		}
 
 		ChunkPos center = ChunkPos.containing(gsm.getPlayingSpawn());
 
@@ -646,7 +652,13 @@ public class CivilizationManager {
 		if (!civPlaying) return;
 		serverRef = server;
 		ServerLevel level = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(server);
-		if (level == null) level = server.overworld();
+		if (level == null) {
+			// 竞技场缺失：本 tick 不做事（不得把判定/清理作用到原版主世界）
+			if (server.getTickCount() % 200 == 0) {
+				SurvivalContract.LOGGER.warn("[Civilization] tick skipped: arena overworld missing");
+			}
+			return;
+		}
 		long now = server.getTickCount();
 
 		// 守护怪火焰抑制（第六十批）：每 tick 扑灭守护怪身上的火（僵尸马坐骑白天不自燃）
@@ -2638,41 +2650,44 @@ public class CivilizationManager {
 		// 清理实体（悬浮图标/盔甲架/猪灵）
 		if (serverRef != null) {
 			ServerLevel level = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(serverRef);
-			if (level == null) level = serverRef.overworld();
-			for (var z : zones.values()) removeFloatIcon(level, z);
-			for (UUID id : hqStands.keySet()) {
-				var e = level.getEntity(id);
-				if (e != null) e.discard();
-			}
-			for (UUID id : piglins.keySet()) {
-				var e = level.getEntity(id);
-				if (e != null) e.discard();
-			}
-			// 清理区块生物（本系统生成的动物/怪物/村民）
-			for (UUID id : managedMobs.keySet()) {
-				var e = level.getEntity(id);
-				if (e != null) e.discard();
-			}
-			// 清理基地商人（第五十一批；假人环境查找表外走引用兜底）
-			for (var ref : merchantRefs.values()) {
-				if (ref != null) {
-					try { ref.discard(); } catch (Exception ignored) {}
+			// 竞技场已拆除（回大厅 teardown 之后）：实体随维度一起消失，无需清理；
+			// 绝不能退回原版主世界去 discard 同 UUID 的实体
+			if (level != null) {
+				for (var z : zones.values()) removeFloatIcon(level, z);
+				for (UUID id : hqStands.keySet()) {
+					var e = level.getEntity(id);
+					if (e != null) e.discard();
+				}
+				for (UUID id : piglins.keySet()) {
+					var e = level.getEntity(id);
+					if (e != null) e.discard();
+				}
+				// 清理区块生物（本系统生成的动物/怪物/村民）
+				for (UUID id : managedMobs.keySet()) {
+					var e = level.getEntity(id);
+					if (e != null) e.discard();
+				}
+				// 清理基地商人（第五十一批；假人环境查找表外走引用兜底）
+				for (var ref : merchantRefs.values()) {
+					if (ref != null) {
+						try { ref.discard(); } catch (Exception ignored) {}
+					}
+				}
+				for (UUID id : merchantIds.values()) {
+					var e = level.getEntity(id);
+					if (e != null) e.discard();
+				}
+				// 清理羊毛挖掘高亮实体（第五十批）+ 退出 scoreboard 发光队伍
+				for (UUID id : woolGlow.values()) {
+					var e = level.getEntity(id);
+					if (e != null) {
+						removeFromGlowTeam(e);
+						e.discard();
+					}
 				}
 			}
-			for (UUID id : merchantIds.values()) {
-				var e = level.getEntity(id);
-				if (e != null) e.discard();
 			}
-			// 清理羊毛挖掘高亮实体（第五十批）+ 退出 scoreboard 发光队伍
-			for (UUID id : woolGlow.values()) {
-				var e = level.getEntity(id);
-				if (e != null) {
-					removeFromGlowTeam(e);
-					e.discard();
-				}
-			}
-		}
-		// 占领进度 bossbar 清理
+			// 占领进度 bossbar 清理
 		for (var bar : claimBars.values()) {
 			bar.removeAllPlayers();
 			bar.setVisible(false);
@@ -2719,18 +2734,20 @@ public class CivilizationManager {
 		// 恢复进入文明时代前的环境 gamerule（生物破坏/火蔓延/昼夜推进），避免影响其他模式
 		if (serverRef != null && savedMobGriefing != null) {
 			ServerLevel lvl = com.survivalcontract.dimension.ArenaWorldManager.getArenaOverworld(serverRef);
-			if (lvl == null) lvl = serverRef.overworld();
-			lvl.getGameRules().set(net.minecraft.world.level.gamerules.GameRules.MOB_GRIEFING,
-					savedMobGriefing, serverRef);
-			if (savedFireSpread != null) {
-				lvl.getGameRules().set(
-						net.minecraft.world.level.gamerules.GameRules.FIRE_SPREAD_RADIUS_AROUND_PLAYER,
-						savedFireSpread, serverRef);
-			}
-			if (savedAdvanceTime != null) {
-				lvl.getGameRules().set(
-						net.minecraft.world.level.gamerules.GameRules.ADVANCE_TIME,
-						savedAdvanceTime, serverRef);
+			// 竞技场已拆除 → 规则随维度一起消失；绝不能把保存的规则写回原版主世界
+			if (lvl != null) {
+				lvl.getGameRules().set(net.minecraft.world.level.gamerules.GameRules.MOB_GRIEFING,
+						savedMobGriefing, serverRef);
+				if (savedFireSpread != null) {
+					lvl.getGameRules().set(
+							net.minecraft.world.level.gamerules.GameRules.FIRE_SPREAD_RADIUS_AROUND_PLAYER,
+							savedFireSpread, serverRef);
+				}
+				if (savedAdvanceTime != null) {
+					lvl.getGameRules().set(
+							net.minecraft.world.level.gamerules.GameRules.ADVANCE_TIME,
+							savedAdvanceTime, serverRef);
+				}
 			}
 		}
 		savedMobGriefing = null;

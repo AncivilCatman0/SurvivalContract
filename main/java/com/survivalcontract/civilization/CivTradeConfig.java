@@ -91,8 +91,10 @@ public class CivTradeConfig {
 
 	/** 配置版本：默认值变更时 +1；旧版本文件会备份为 .bak 后重新生成默认。
 	 *  2 = 第六十九批：商人取消附魔书售卖，改售附魔之瓶（30 积分/个，不涨价）
-	 *  3 = 第七十八批：新增三号位固定商品 回城卷轴（500 积分/个，右键消耗回到队伍出生点） */
-	public static final int CONFIG_VERSION = 3;
+	 *  3 = 第七十八批：新增三号位固定商品 回城卷轴（500 积分/个，右键消耗回到队伍出生点）
+	 *  4 = 第八十七批：采用玩家实测回收价目（煤炭 4 / 铜锭 2 / 铁锭 4 / 金锭 8 / 钻石 16 / 石英 4 /
+	 *      青金石 4 / 红石 8 / 绿宝石 12 / 下界合金锭 64，土豆 1） */
+	public static final int CONFIG_VERSION = 4;
 
 	/** 基地商人默认商品（= 第七十八批结构：1 附魔之瓶（30 积分，固定价不涨价）+ 1 回城卷轴（500 积分）
 	 *  + 2 随机武器装备 + 1 随机药水；附魔之瓶之后即三号位 回城卷轴） */
@@ -123,7 +125,7 @@ public class CivTradeConfig {
 		return list;
 	}
 
-	/** 猪灵回收默认价目（= 第五十批及之前硬编码价表） */
+	/** 猪灵回收默认价目（第八十七批起 = 玩家实测价目；旧版硬编码价表见 CHANGELOG 第五十批） */
 	public static Map<String, Double> defaultRecyclePrices() {
 		Map<String, Double> m = new LinkedHashMap<>();
 		// 原木 ×9（1 分/个）
@@ -132,22 +134,22 @@ public class CivTradeConfig {
 			m.put(log, 1.0);
 		}
 		m.put("charcoal", 2.0);
-		m.put("potato", 0.5);
+		m.put("potato", 1.0);
 		// 石类（1 分/个）
-		for (String st : new String[]{"cobblestone", "stone", "cobbled_deepslate",
+		for (String st : new String[]{"cobblestone", "cobbled_deepslate",
 				"deepslate", "blackstone", "tuff"}) {
 			m.put(st, 1.0);
 		}
-		m.put("coal", 3.0);
-		m.put("raw_copper", 1.5);
-		m.put("iron_ingot", 3.0);
-		m.put("gold_ingot", 3.0);
-		m.put("diamond", 10.0);
-		m.put("quartz_block", 10.0);
-		m.put("lapis_lazuli", 2.0);
-		m.put("redstone_block", 10.0);
-		m.put("emerald", 2.0);
-		m.put("netherite_ingot", 20.0);
+		m.put("coal", 4.0);
+		m.put("copper_ingot", 2.0);
+		m.put("iron_ingot", 4.0);
+		m.put("gold_ingot", 8.0);
+		m.put("diamond", 16.0);
+		m.put("quartz", 4.0);
+		m.put("lapis_lazuli", 4.0);
+		m.put("redstone", 8.0);
+		m.put("emerald", 12.0);
+		m.put("netherite_ingot", 64.0);
 		return m;
 	}
 

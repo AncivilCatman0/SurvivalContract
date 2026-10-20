@@ -126,7 +126,7 @@ public class CivilizationProductionConfig {
 	public static class WildlifeCfg {
 		public String 说明 = "野生动物区：每 intervalSeconds 秒刷 animalPerInterval 只动物（区内上限 animalCap 只）；"
 				+ "villagerChancePercent 概率刷 1 名村民（区内无村民时）；有村民时每 intervalSeconds 秒产出 emeraldCount 个绿宝石。";
-		public int intervalSeconds = 60;
+		public int intervalSeconds = 30;
 		public int animalPerInterval = 6;
 		public int animalCap = 12;
 		public int villagerChancePercent = 15;
@@ -174,21 +174,22 @@ public class CivilizationProductionConfig {
 	public static class ZoneLimitsCfg {
 		public String 说明 = "资源区数量上限：limits 键 = 资源区类型（WOOD/STONE/COPPER/IRON/GOLD/DIAMOND/QUARTZ/LAPIS/ALLOY/SAND），"
 				+ "值 = 全图（15×15 区块）内该类型资源区的最多数量；缺省或 0 = 无限制。"
-				+ "默认：合金区 ≤5、钻石区 ≤20。";
+				+ "默认：合金区 ≤3、钻石区 ≤15。";
 		/** 键 = 资源区类型名；值 = 上限（0 = 无限制） */
 		public Map<String, Integer> limits = new LinkedHashMap<>();
 
 		public ZoneLimitsCfg() {
-			limits.put("ALLOY", 5);
-			limits.put("DIAMOND", 20);
+			limits.put("ALLOY", 3);
+			limits.put("DIAMOND", 15);
 		}
 	}
 
 	// ==================== 默认值（与旧版硬编码行为一致） ====================
 
 	/** 配置版本：默认值变更（概率/间隔调整等）时 +1；旧版本文件会备份为 .bak 后重新生成默认。
-	 *  5 = 第七十八批：合金碎片区新增 10% 概率额外产出 1 个下界岩 */
-	public static final int CONFIG_VERSION = 5;
+	 *  5 = 第七十八批：合金碎片区新增 10% 概率额外产出 1 个下界岩
+	 *  6 = 第八十七批：采用玩家实测参数（各区间隔 30s、铜/铁/金改产锭、概率与数量上限调整） */
+	public static final int CONFIG_VERSION = 6;
 
 	/** 参与产出的资源区（大本营/野生动物区不在其中——野生动物区有独立配置节） */
 	static final CivilizationManager.ZoneType[] PRODUCIBLE = {
@@ -206,53 +207,53 @@ public class CivilizationProductionConfig {
 
 		c.zones.put("WOOD", require(zone("木头区：每 intervalSeconds 秒产出 count 个橡木原木；"
 				+ "30% 概率额外产出 1 个苹果；10% 概率额外产出 1 个随机蔬果（西瓜片/南瓜/胡萝卜/小麦/马铃薯）。无前置。",
-				60, "oak_log", 6,
+				30, "oak_log", 8,
 				bonus("苹果", 30, "apple"),
 				bonus("随机蔬果", 10, "melon_slice", "pumpkin", "carrot", "wheat", "potato"))));
-		c.zones.put("STONE", require(zone("石头区：每 intervalSeconds 秒产出 count 个圆石；20% 概率额外产出 1 个煤炭；"
+		c.zones.put("STONE", require(zone("石头区：每 intervalSeconds 秒产出 count 个圆石；20% 概率额外产出 2 个煤炭；"
 				+ "15% 概率额外产出 1 个沙砾。前置：任意木头（各树种的六面皮木块，非原木）。",
-				60, "cobblestone", 10,
-				bonus("煤炭", 20, "coal"),
+				30, "cobblestone", 8,
+				bonusCount("煤炭", 20, 2, "coal"),
 				bonus("沙砾", 15, "gravel")), "oak_wood"));
-		c.zones.put("COPPER", require(zone("铜矿区：每 intervalSeconds 秒产出 count 个粗铜。前置：熔炉 + 煤炭块。",
-				60, "raw_copper", 12), "furnace", "coal_block"));
-		c.zones.put("IRON", require(zone("铁矿区：每 intervalSeconds 秒产出 count 个粗铁。前置：熔炉 + 铜块 + 铜箱子"
+		c.zones.put("COPPER", require(zone("铜矿区：每 intervalSeconds 秒产出 count 个铜锭。前置：熔炉 + 煤炭块。",
+				30, "copper_ingot", 12), "furnace", "coal_block"));
+		c.zones.put("IRON", require(zone("铁矿区：每 intervalSeconds 秒产出 count 个铁锭。前置：熔炉 + 铜块 + 铜箱子"
 				+ "（氧化/涂蜡变体同样有效，氧化不会中断收获）。",
-				60, "raw_iron", 8), "furnace", "copper_block", "waxed_copper_chest"));
-		c.zones.put("GOLD", require(zone("金矿区：每 intervalSeconds 秒产出 count 个粗金。前置：高炉 + 铁块 + 铜箱子"
+				30, "iron_ingot", 8), "furnace", "copper_block", "waxed_copper_chest"));
+		c.zones.put("GOLD", require(zone("金矿区：每 intervalSeconds 秒产出 count 个金锭。前置：高炉 + 铁块 + 铜箱子"
 				+ "（氧化/涂蜡变体同样有效，氧化不会中断收获）。",
-				60, "raw_gold", 10), "blast_furnace", "iron_block", "waxed_copper_chest"));
-		c.zones.put("DIAMOND", require(zone("钻石区：每 intervalSeconds 秒产出 count 个钻石；10% 概率额外产出 1 个黑曜石"
+				30, "gold_ingot", 8), "blast_furnace", "iron_block", "waxed_copper_chest"));
+		c.zones.put("DIAMOND", require(zone("钻石区：每 intervalSeconds 秒产出 count 个钻石；20% 概率额外产出 1 个黑曜石"
 				+ "（每个钻石区累计最多 30 个，产满后不再产出）。前置：高炉 + 金块 + 铜箱子"
 				+ "（氧化/涂蜡变体同样有效，氧化不会中断收获）。",
-				60, "diamond", 5,
-				bonusCap("黑曜石", 10, 30, "obsidian")), "blast_furnace", "gold_block", "waxed_copper_chest"));
-		c.zones.put("QUARTZ", require(zone("石英区：每 intervalSeconds 秒产出 count 个石英；8% 概率额外产出 1 个地狱疣；"
+				30, "diamond", 4,
+				bonusCap("黑曜石", 20, 30, "obsidian")), "blast_furnace", "gold_block", "waxed_copper_chest"));
+		c.zones.put("QUARTZ", require(zone("石英区：每 intervalSeconds 秒产出 count 个石英；15% 概率额外产出 1 个地狱疣；"
 				+ "30% 概率刷 2 只岩浆怪。前置：熔炉。",
-				60, "quartz", 12,
-				new BonusCfg[]{bonus("地狱疣", 8, "nether_wart")},
+				30, "quartz", 12,
+				new BonusCfg[]{bonus("地狱疣", 15, "nether_wart")},
 				"magma_cube", 30, 2), "furnace"));
 		c.zones.put("LAPIS", require(zone("青金石区：每 intervalSeconds 秒产出 count 个青金石；30% 概率额外产出 1 个红石粉；"
 				+ "15% 概率额外产出 1 个经验瓶。前置：熔炉 + 末影箱，且熔炉必须放置在 Y≤0 层。",
-				60, "lapis_lazuli", 10,
+				30, "lapis_lazuli", 8,
 				bonus("红石粉", 30, "redstone"),
 				bonus("经验瓶", 15, "experience_bottle")), "furnace", "ender_chest"));
-		c.zones.put("ALLOY", require(zone("合金碎片区：每 intervalSeconds 秒产出 count 个下界合金碎片；8% 概率额外产出 1 个烈焰棒；"
+		c.zones.put("ALLOY", require(zone("合金碎片区：每 intervalSeconds 秒产出 count 个下界合金碎片；15% 概率额外产出 1 个烈焰棒；"
 				+ "4% 概率额外产出 1 个下界合金升级锻造模板（每区块累计最多 3 个）；"
-				+ "10% 概率额外产出 1 个下界岩；"
+				+ "20% 概率额外产出 1 个下界岩；"
 				+ "25% 概率刷 1 只凋灵骷髅。前置：高炉 + 钻石块 + 铜箱子"
 				+ "（氧化/涂蜡变体同样有效，氧化不会中断收获）。",
-				60, "netherite_scrap", 10,
-				new BonusCfg[]{bonus("烈焰棒", 8, "blaze_rod"),
+				30, "netherite_scrap", 8,
+				new BonusCfg[]{bonus("烈焰棒", 15, "blaze_rod"),
 						bonusCap("锻造模板", 4, 3, "netherite_upgrade_smithing_template"),
-						bonus("下界岩", 10, "netherrack")},
+						bonus("下界岩", 20, "netherrack")},
 				"wither_skeleton", 25, 1),
 				"blast_furnace", "diamond_block", "waxed_copper_chest"));
 		c.zones.put("SAND", require(zone("沙区：需要先放置末影箱才能开始收获——每 intervalSeconds 秒产出 count 个沙子；"
-				+ "5% 概率额外产出 1 个火药；10% 概率额外产出 1 个甘蔗；15% 概率额外产出 1 个玻璃。"
+				+ "10% 概率额外产出 1 个火药；10% 概率额外产出 1 个甘蔗；15% 概率额外产出 1 个玻璃。"
 				+ "产出照常进入区内放置的箱子/木桶。",
 				20, "sand", 8,
-				bonus("火药", 5, "gunpowder"),
+				bonus("火药", 10, "gunpowder"),
 				bonus("甘蔗", 10, "sugar_cane"),
 				bonus("玻璃", 15, "glass")), "ender_chest"));
 		c.resolve(c);
@@ -288,6 +289,14 @@ public class CivilizationProductionConfig {
 		b.说明 = desc + "（概率百分比 " + chance + "%，每次产出结算时按此概率额外产出 1 个）";
 		b.chancePercent = chance;
 		for (String s : items) b.items.add(s);
+		return b;
+	}
+
+	/** 带单次产出数量的副产品（count = 命中时产出的个数） */
+	private static BonusCfg bonusCount(String desc, double chance, int count, String... items) {
+		BonusCfg b = bonus(desc, chance, items);
+		b.count = count;
+		b.说明 = desc + "（概率百分比 " + chance + "%，每次产出结算时按此概率额外产出 " + count + " 个）";
 		return b;
 	}
 

@@ -41,13 +41,23 @@ public final class FixedMapInjector {
 	 * @param zipOverride      外部覆盖用的存档 zip（可为 null）
 	 * @param folderOverride   外部覆盖用的散装文件夹（可为 null）
 	 * @param label            日志标识（如 "大厅地图" / "地狱厨房地图"）
+	 * @return 是否全部写入成功并通过校验（写入失败会删除半截文件，不会留下空地图）
 	 */
-	public static void inject(MinecraftServer server, String namespace, String dimId,
-	                          String jarResourcePrefix, String[][] jarFiles,
-	                          Path zipOverride, Path folderOverride, String label) {
+	public static boolean inject(MinecraftServer server, String namespace, String dimId,
+	                             String jarResourcePrefix, String[][] jarFiles,
+	                             Path zipOverride, Path folderOverride, String label) {
 		Path worldRoot = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT);
 		Path dimDir = worldRoot.resolve("dimensions" + File.separator + namespace + File.separator + dimId);
+		return injectInto(dimDir, jarResourcePrefix, jarFiles, zipOverride, folderOverride, label);
+	}
 
+	/**
+	 * 注入到指定目录（可以是暂存目录，由调用方校验后再搬入正式位置）。
+	 *
+	 * @return 是否全部写入成功并通过 {@link #verify} 校验
+	 */
+	public static boolean injectInto(Path dimDir, String jarResourcePrefix, String[][] jarFiles,
+	                                 Path zipOverride, Path folderOverride, String label) {
 		SurvivalContract.LOGGER.info("Injecting {} region files into: {}", label, dimDir);
 		try {
 			Files.createDirectories(dimDir);
@@ -56,7 +66,7 @@ public final class FixedMapInjector {
 			if (zipOverride != null) {
 				if (extractMcaFromZip(zipOverride, dimDir)) {
 					SurvivalContract.LOGGER.info("{} replaced with custom save zip: {}", label, zipOverride.getFileName());
-					return;
+					return true;
 				}
 				SurvivalContract.LOGGER.warn("Custom zip had no usable .mca files, falling back: {}", zipOverride);
 			}
@@ -65,23 +75,79 @@ public final class FixedMapInjector {
 			try {
 				if (folderOverride != null && copyFromFolder(folderOverride, dimDir)) {
 					SurvivalContract.LOGGER.info("{} replaced with custom folder: {}", label, folderOverride);
-					return;
+					return true;
 				}
 			} catch (Exception e) {
 				SurvivalContract.LOGGER.warn("Failed to copy custom folder for {}, falling back to bundled map", label, e);
 			}
 
 			// 3) JAR 内置资源
+			boolean ok = true;
 			if (jarFiles != null) {
 				for (int i = 0; i < MCA_SUBDIRS.length && i < jarFiles.length; i++) {
 					Path targetSub = dimDir.resolve(MCA_SUBDIRS[i]);
 					Files.createDirectories(targetSub);
-					copyFromJarResources(jarResourcePrefix, MCA_SUBDIRS[i], jarFiles[i], targetSub, label);
+					ok = copyFromJarResources(jarResourcePrefix, MCA_SUBDIRS[i], jarFiles[i], targetSub, label) && ok;
 				}
 			}
+			if (!ok || !verify(dimDir, jarResourcePrefix, jarFiles)) {
+				SurvivalContract.LOGGER.error("{} 注入失败或校验不通过（mod jar 是否在游戏运行中被替换？）：{}", label, dimDir);
+				return false;
+			}
 			SurvivalContract.LOGGER.info("{} region files installed successfully (bundled).", label);
+			return true;
 		} catch (Exception e) {
 			SurvivalContract.LOGGER.error("Failed to inject {} region files", label, e);
+			return false;
+		}
+	}
+
+	/**
+	 * 校验地图目录：清单里每个 .mca 都必须存在，且大小与 JAR 内置资源一致
+	 * （资源不可读时返回 false —— 宁可报错，也不能把空文件当成地图用）。
+	 */
+	public static boolean verify(Path dimDir, String jarResourcePrefix, String[][] jarFiles) {
+		if (jarFiles == null) return true;
+		if (!Files.isDirectory(dimDir)) return false; // 目录不存在（如首次开局还没有快照）：静默返回
+		boolean ok = true;
+		for (int i = 0; i < MCA_SUBDIRS.length && i < jarFiles.length; i++) {
+			for (String name : jarFiles[i]) {
+				String resourcePath = jarResourcePrefix + MCA_SUBDIRS[i] + "/" + name;
+				long expected = resourceSize(resourcePath);
+				Path f = dimDir.resolve(MCA_SUBDIRS[i]).resolve(name);
+				long actual = Files.isRegularFile(f) ? sizeOf(f) : -1L;
+				if (expected < 0 || actual != expected) {
+					SurvivalContract.LOGGER.warn("地图校验失败：{}/{} 期望 {} 字节，实际 {} 字节（资源读取{}）",
+							MCA_SUBDIRS[i], name, expected, actual, expected < 0 ? "失败" : "正常");
+					ok = false;
+				}
+			}
+		}
+		return ok;
+	}
+
+	private static long sizeOf(Path f) {
+		try {
+			return Files.size(f);
+		} catch (Exception e) {
+			return -1L;
+		}
+	}
+
+	/** 读取 classpath 资源字节数（JAR 条目或开发环境内的散装文件；不可读返回 -1） */
+	public static long resourceSize(String resourcePath) {
+		try {
+			java.net.URL url = FixedMapInjector.class.getClassLoader().getResource(resourcePath);
+			if (url == null) return -1L;
+			java.net.URLConnection conn = url.openConnection();
+			if (conn instanceof java.net.JarURLConnection jc) {
+				jc.setUseCaches(false);
+				var entry = jc.getJarEntry();
+				return entry == null ? -1L : entry.getSize();
+			}
+			return conn.getContentLengthLong();
+		} catch (Exception e) {
+			return -1L;
 		}
 	}
 
@@ -148,26 +214,50 @@ public final class FixedMapInjector {
 		return any;
 	}
 
-	/** 从 classpath 资源拷贝指定文件名的 .mca（JAR 与开发环境都可用）。 */
-	public static void copyFromJarResources(String resourcePrefix, String subdir, String[] filenames,
-	                                        Path targetDir, String label) throws IOException {
+	/**
+	 * 从 classpath 资源拷贝指定文件名的 .mca（JAR 与开发环境都可用）。
+	 *
+	 * @return 是否全部拷贝成功；读到的字节数与资源声明大小不符时删除半截文件并返回 false
+	 */
+	public static boolean copyFromJarResources(String resourcePrefix, String subdir, String[] filenames,
+	                                           Path targetDir, String label) {
 		ClassLoader cl = FixedMapInjector.class.getClassLoader();
-		String prefix = resourcePrefix + subdir + "/";
-		if (filenames == null) return;
+		if (filenames == null) return true;
+		boolean ok = true;
 		for (String fileName : filenames) {
-			String resourcePath = prefix + fileName;
-			InputStream is = cl.getResourceAsStream(resourcePath);
-			if (is == null) {
-				SurvivalContract.LOGGER.debug("  [{}] Resource not found: {}", label, resourcePath);
+			String resourcePath = resourcePrefix + subdir + "/" + fileName;
+			java.net.URL url = cl.getResource(resourcePath);
+			if (url == null) {
+				SurvivalContract.LOGGER.error("  [{}] 资源缺失：{}", label, resourcePath);
+				ok = false;
 				continue;
 			}
+			long expected = resourceSize(resourcePath);
 			Path target = targetDir.resolve(fileName);
-			try (OutputStream os = Files.newOutputStream(target,
-					StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-				is.transferTo(os);
+			long copied;
+			try (InputStream is = url.openStream();
+				 OutputStream os = Files.newOutputStream(target,
+						 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+				copied = is.transferTo(os);
+			} catch (IOException e) {
+				SurvivalContract.LOGGER.error("  [{}] 资源读取失败：{}", label, resourcePath, e);
+				try {
+					Files.deleteIfExists(target);
+				} catch (IOException ignored) {}
+				ok = false;
+				continue;
 			}
-			is.close();
+			if (expected >= 0 && copied != expected) {
+				SurvivalContract.LOGGER.error("  [{}] 资源读取不完整：{}（期望 {} 字节，实际 {} 字节）",
+						label, resourcePath, expected, copied);
+				try {
+					Files.deleteIfExists(target); // 不留半截文件冒充地图
+				} catch (IOException ignored) {}
+				ok = false;
+				continue;
+			}
 			SurvivalContract.LOGGER.debug("  [{}] Injected: {}/{}", label, subdir, fileName);
 		}
+		return ok;
 	}
 }

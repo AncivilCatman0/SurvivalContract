@@ -86,7 +86,7 @@ public class ServerSelfTest {
 				case 1 -> { if (tick >= 240) { testSoloEventIndependence(); testRuleAndTaskData(); testTeamAssign(); testSpectatorMode(); testNewRulesAndTeamChest(); testRound4Rules(); step = 2; } }
 				case 2 -> { testTeamRuleSync(); testPickupLock(); step = 3; }
 				case 3 -> { testDoubleBan(); step = 4; }
-				case 4 -> { testGodsLies(); testGodsLiesRelic(); testStowaway(); testCivilization(); testBatch52Features(); testBatch53Features(); testBatch54Features(); testBatch57Features(); testBatch60Features(); testBatch61Features(); testBatch62Features(); testBatch63Features(); testBatch64Features(); testBatch66Features(); testBatch67Features(); testBatch68Features(); testBatch69Features(); testBatch70Features(); testBatch71Features(); testBatch72Features(); testBatch74Features(); testBatch75Features(); testTaskConflictFiltering(); step = 41; }
+				case 4 -> { ensureTestArena(); testGodsLies(); testGodsLiesRelic(); testStowaway(); testCivilization(); testBatch52Features(); testBatch53Features(); testBatch54Features(); testBatch57Features(); testBatch60Features(); testBatch61Features(); testBatch62Features(); testBatch63Features(); testBatch64Features(); testBatch66Features(); testBatch67Features(); testBatch68Features(); testBatch69Features(); testBatch70Features(); testBatch71Features(); testBatch72Features(); testBatch74Features(); testBatch75Features(); testBatch90Features(); testTaskConflictFiltering(); step = 41; }
 				// 尘肺病矿工免疫的行为验证必须跨越真实整秒 tick（perSecond 门控），完成后再开局
 				case 41 -> dustLungImmunityStep();
 				case 5 -> { if (tick >= startTick + 240) { testScoresAndTask(); spawnMidGameSpectator(); step = 55; } }
@@ -779,12 +779,13 @@ public class ServerSelfTest {
 	}
 
 	/**
-	 * 神的谎言：神谕纸符（第五十九批）——首件消耗道具全链路。
+	 * 神的谎言：神谕纸符（第九十一批按用户规则重做结算）——首件消耗道具全链路。
 	 * 局1（2 使者 + 1 平民）：B 级不发放 / A/S 级首次获得 / 重复不发放 / 使者链接消耗纸符 /
-	 * 平民武装神罚免疫与一次性使用 / 多使者被指认 → 使者 -200 淘汰、免疫链接者无恙（第六十九批）→ 使者获胜。
+	 * 平民武装神罚免疫与一次性使用 / 至少两名使者时被指认 → 使者与链接者一同出局（已武装纸符照常出局）。
 	 * 局2（1 使者 + 2 平民）：纸符免疫挡降罪（一次性消耗）/ 纸符死亡保留（普通纸照常掉落）/
-	 * 最后使者被指认 → -200 淘汰（第六十九批取消免死特例）→ 平民获胜。
-	 * 局3（1 使者 + 2 平民）：最后使者链接未武装平民 → 被指认后使者 -200 淘汰 + 链接者自动神罚 -55。
+	 * 仅剩一名使者被指认 → 抵挡一次指认出局，链接者受神罚（免疫可挡）；第二次指认正常淘汰。
+	 * 局3（1 使者 + 2 平民）：最后使者链接未武装平民 → 抵挡出局 + 链接者自动神罚 -55；第二次指认正常淘汰。
+	 * 局4（1 使者 + 2 平民）：平民纸符只挡神罚，不挡指认失败 -200。
 	 * 直接调用底层方法（真指令/网络路径无法在自测中覆盖），结束后还原常规模式与原阶段。
 	 */
 	private static void testGodsLiesRelic() {
@@ -837,18 +838,19 @@ public class ServerSelfTest {
 					"平民武装神罚免疫", "右键使用纸符 → 武装 1 次神罚免疫（不挡指认失败）");
 			check(!gsm.useRelicCivilian(civ), "平民使用：一次性", "已使用过 → 再次使用失败");
 
-			// 多使者被指认（第六十九批）：使者 -200 分淘汰；已武装纸符免疫的链接者挡下契约神罚不受影响；
-			// 存活平民 1 = 存活使者 1 → 使者获胜
+			// 多使者被指认（第九十一批）：使者与链接者一同出局（已武装纸符的平民也照常出局）；
+			// 存活平民 0、存活使者 1 → 使者获胜
 			gsm.grantGodsLiesTaskReward(civ); // 指认权 +1
 			var res1 = gsm.resolveAccusation(civ.getUUID(), env1.getUUID());
-			check(res1 == GameStateManager.AccuseResult.HIT && gsm.isEliminated(env1.getUUID())
-							&& gsm.getScore(env1.getUUID()) == 0 && !gsm.isEliminated(civ.getUUID())
-							&& gsm.getScore(civ.getUUID()) == 100 && !gsm.hasRelicImmunity(civ.getUUID()),
-					"多使者被指认：使者 -200 淘汰、免疫链接者无恙",
-					"使者 100-200 → 淘汰（分数 ≤0 显示 0）；已武装纸符免疫的平民挡下契约神罚（100 分不变）");
+			check(res1 == GameStateManager.AccuseResult.BOTH_OUT && gsm.isEliminated(env1.getUUID())
+							&& gsm.isEliminated(civ.getUUID()) && gsm.getScore(env1.getUUID()) == 100
+							&& gsm.getScore(civ.getUUID()) == 100
+							&& gsm.getLinkedPlayer(env1.getUUID()) == null,
+					"双使者：使者与链接者一同出局",
+					"契约触发 → 使者与已武装纸符的链接者强制出局（分数不变、纸符免疫不能挡）");
 			check("envoys_victory".equals(gsm.godsLiesEndReason())
 							&& gsm.getCurrentPhase() == GameStateManager.GamePhase.FINISHED,
-					"多使者被指认：使者获胜判定", "存活平民 1 = 存活使者 1 → 使者获胜");
+					"双使者一同出局：使者获胜判定", "存活平民 0 → 余下使者获胜");
 
 			// ===== 局2：1 使者 + 2 平民 =====
 			gsm.resetGodsLies();
@@ -933,17 +935,27 @@ public class ServerSelfTest {
 			gsm.consumeTaskRefreshToken(civB);
 			tmRefresh.resetAll();
 
-			// 最后使者被指认（第六十九批）：-200 淘汰（无免死）→ 游戏结束
+			// 最后使者被指认（第九十一批）：纸符抵挡一次指认出局（不扣分、不淘汰、不公开），链接者受神罚；
+			// 链接者已武装纸符 → 神罚被挡下（免疫消耗）
 			gsm.grantGodsLiesTaskReward(civB); // 指认权 +1
 			var res2 = gsm.resolveAccusation(civB.getUUID(), envB.getUUID());
-			check(res2 == GameStateManager.AccuseResult.HIT && gsm.isEliminated(envB.getUUID())
-							&& gsm.getScore(envB.getUUID()) == 0 && gsm.getScore(civA.getUUID()) == 100
-							&& !gsm.hasRelicImmunity(civA.getUUID()) && !gsm.isEliminated(civB.getUUID())
-							&& gsm.getScore(civB.getUUID()) == 100
+			check(res2 == GameStateManager.AccuseResult.NULLIFIED && !gsm.isEliminated(envB.getUUID())
+							&& gsm.getScore(envB.getUUID()) == 100 && !gsm.isEliminated(civA.getUUID())
+							&& gsm.getScore(civA.getUUID()) == 100 && !gsm.hasRelicImmunity(civA.getUUID())
+							&& gsm.getLinkedPlayer(envB.getUUID()) == null
+							&& gsm.godsLiesEndReason() == null
+							&& gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING,
+					"最后使者纸符：抵挡一次指认出局",
+					"使者 100 分不变、未淘汰；链接者神罚被纸符免疫挡下（免疫消耗）；对局继续");
+			// 契约一次性：第二次指认恢复正常 -200 → 淘汰 → 平民获胜
+			gsm.grantGodsLiesTaskReward(civB);
+			var res2b = gsm.resolveAccusation(civB.getUUID(), envB.getUUID());
+			check(res2b == GameStateManager.AccuseResult.HIT && gsm.isEliminated(envB.getUUID())
+							&& gsm.getScore(envB.getUUID()) == 0
 							&& "envoys_eliminated".equals(gsm.godsLiesEndReason())
 							&& gsm.getCurrentPhase() == GameStateManager.GamePhase.FINISHED,
-					"最后使者被指认 → -200 淘汰（无免死）",
-					"使者 100-200 → 淘汰（分数 ≤0 显示 0）；链接者纸符免疫挡下契约神罚（100 分不变，免疫消耗）→ 平民获胜");
+					"最后使者纸符：仅抵挡一次",
+					"第二次指认无契约 → -200 淘汰 → 平民获胜");
 
 			// ===== 局3：1 使者 + 2 平民（链接者未武装）=====
 			gsm.resetGodsLies();
@@ -961,14 +973,44 @@ public class ServerSelfTest {
 			gsm.confirmRelicLink(envC, civC.getUUID());
 			gsm.grantGodsLiesTaskReward(civD); // 指认权 +1
 			var res3 = gsm.resolveAccusation(civD.getUUID(), envC.getUUID());
-			check(res3 == GameStateManager.AccuseResult.HIT && gsm.isEliminated(envC.getUUID())
-							&& gsm.getScore(envC.getUUID()) == 0 && gsm.getScore(civC.getUUID()) == 45
-							&& !gsm.isEliminated(civC.getUUID()) && gsm.isGodEnvoy(envC.getUUID())
+			check(res3 == GameStateManager.AccuseResult.NULLIFIED && !gsm.isEliminated(envC.getUUID())
+							&& gsm.getScore(envC.getUUID()) == 100 && gsm.getScore(civC.getUUID()) == 45
+							&& !gsm.isEliminated(civC.getUUID())
 							&& gsm.getLinkedPlayer(envC.getUUID()) == null
+							&& gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING,
+					"最后使者链接未武装平民 → 抵挡出局 + 链接者神罚",
+					"使者 100 分不变未淘汰；链接者 100 → 45；契约一次性清除");
+			// 契约已消耗：第二次指认恢复正常 -200 → 淘汰 → 平民获胜
+			gsm.grantGodsLiesTaskReward(civD);
+			var res3b = gsm.resolveAccusation(civD.getUUID(), envC.getUUID());
+			check(res3b == GameStateManager.AccuseResult.HIT && gsm.isEliminated(envC.getUUID())
+							&& gsm.getScore(envC.getUUID()) == 0
 							&& "envoys_eliminated".equals(gsm.godsLiesEndReason())
 							&& gsm.getCurrentPhase() == GameStateManager.GamePhase.FINISHED,
-					"最后使者链接未武装平民 → 被指认后双方结算",
-					"使者 -200 淘汰（分数 ≤0 显示 0）；链接者自动神罚 100 → 45；链接一次性清除 → 平民获胜");
+					"最后使者：第二次指认正常淘汰",
+					"无契约 → -200 淘汰 → 平民获胜");
+
+			// ===== 局4：平民纸符不挡指认失败扣分 =====
+			gsm.resetGodsLies();
+			gsm.setEnvoyCount(1);
+			gsm.setupGodsLiesEnvoys(server.get());
+			gsm.setCurrentPhase(GameStateManager.GamePhase.PLAYING);
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) gsm.setScore(p.getUUID(), 100);
+			ServerPlayer civE = null, civF = null;
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) {
+				if (gsm.isGodEnvoy(p.getUUID())) continue;
+				if (civE == null) civE = p;
+				else civF = p;
+			}
+			gsm.grantGodsLiesRelic(civF, true);
+			gsm.useRelicCivilian(civF);
+			gsm.grantGodsLiesTaskReward(civF);
+			var res4 = gsm.resolveAccusation(civF.getUUID(), civE.getUUID());
+			check(civE != null && res4 == GameStateManager.AccuseResult.MISS
+							&& gsm.getScore(civF.getUUID()) == 0 && gsm.isEliminated(civF.getUUID())
+							&& gsm.hasRelicImmunity(civF.getUUID()),
+					"平民纸符：不挡指认失败扣分",
+					"指认平民失败 → 自己 -200（100 分 → 淘汰），纸符神罚免疫未被消耗");
 		} finally {
 			// 还原：常规模式 + 原阶段 + 生存模式 + 各假人规则集 + 清理背包纸符（不影响后续 startGame）
 			gsm.setPlayStyle(GameStateManager.PlayStyle.NORMAL);
@@ -1794,8 +1836,8 @@ public class ServerSelfTest {
 				cv.registerFacility(woodPos); // 第六十八批：任意放置方块都登记为设施
 				cv.produceZoneForTest(level, stoneChunk);
 				int stone1 = countInContainer(level, chestPos, net.minecraft.world.item.Items.COBBLESTONE);
-				check(stone1 == 10, "放置橡木木头后产出圆石×10（无需挨着）",
-						"前置登记后圆石 " + stone1 + " 个（应 10）");
+				check(stone1 == 8, "放置橡木木头后产出圆石×8（无需挨着）",
+						"前置登记后圆石 " + stone1 + " 个（应 8）");
 				level.setBlock(woodPos, savedWood, 3); // 精确还原原方块状态
 				level.setBlock(chestPos, savedChest, 3);
 				zone.owner = savedOwner;
@@ -1826,7 +1868,7 @@ public class ServerSelfTest {
 				cv.registerFacility(chestPos);
 				cv.produceZoneForTest(level, woodChunk);
 				int logs = countInContainer(level, chestPos, net.minecraft.world.item.Items.OAK_LOG);
-				check(logs == 6, "木头区产出橡木原木×6", "oak_log " + logs + " 个（应 6，不再产出橡木木块）");
+				check(logs == 8, "木头区产出橡木原木×8", "oak_log " + logs + " 个（应 8，不再产出橡木木块）");
 				level.setBlock(chestPos, savedChest, 3); // 精确还原原方块状态
 				zone.owner = savedOwner;
 			}
@@ -1970,6 +2012,111 @@ public class ServerSelfTest {
 			// 属固有测试泄漏而非本批回归）。清空后 startGame 按「干净大厅」计分：0 规则分 + 无职业 +10。
 			var cmCleanup = ChallengeManager.getInstance();
 			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) cmCleanup.clearPlayerChallenges(p.getUUID());
+		}
+	}
+
+	/**
+	 * 第九十批回归：
+	 * ①受贿结算不再漏计——结算前再倒一次收纳袋内嵌内容 + 计入菜单光标上的物品，并关闭界面；
+	 * ②走私犯与检察官达标胜利：率先达到「参战人数 × 300」分的个人/队伍直接获胜。
+	 */
+	private static void testBatch90Features() {
+		var gsm = GameStateManager.getInstance();
+		var sm = com.survivalcontract.smuggle.SmuggleManager.getInstance();
+		var srv = server.get();
+		var savedPhase = gsm.getCurrentPhase();
+		var savedStyle = gsm.getPlayStyle();
+		var savedMode = gsm.getGameMode();
+		var savedStart = gsm.getGameStartTime();
+		var savedTeams = gsm.getAllTeams();
+		var DIAMOND = net.minecraft.world.item.Items.DIAMOND;
+		var GOLD = net.minecraft.world.item.Items.GOLD_INGOT;
+		var EMERALD = net.minecraft.world.item.Items.EMERALD;
+		try {
+			gsm.setPlayStyle(GameStateManager.PlayStyle.STOWAWAY);
+			gsm.setGameMode(GameStateManager.GameMode.SOLO);
+			gsm.setCurrentPhase(GameStateManager.GamePhase.PLAYING);
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) {
+				p.getInventory().clearContent();
+				gsm.setScore(p.getUUID(), 0);
+			}
+			sm.setup(srv);
+
+			// ---- ① 受贿结算：袋内 2 钻石（16）+ 光标 2 金锭（8）+ 袋道具内嵌 1 绿宝石（8）= 32 ----
+			red1.getInventory().clearContent();
+			var bribe90 = sm.bribeBagFor(red1.getUUID());
+			bribe90.clearContent();
+			bribe90.setItem(0, new net.minecraft.world.item.ItemStack(DIAMOND, 2));
+			sm.openBag(red1, true); // 打开贿赂袋界面（结算时光标物品的漏计路径）
+			if (red1.containerMenu instanceof net.minecraft.world.inventory.ChestMenu cm90) {
+				cm90.setCarried(new net.minecraft.world.item.ItemStack(GOLD, 2));
+			}
+			// 打开界面后再往袋道具里塞物品（结算前才 spill 的漏计路径）
+			var stuffed90 = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BUNDLE);
+			stuffed90.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+					net.minecraft.network.chat.Component.literal("§c贿赂收纳袋"));
+			var mut90 = com.survivalcontract.McCompat.newMutableBundle(
+					net.minecraft.world.item.component.BundleContents.EMPTY);
+			mut90.tryInsert(new net.minecraft.world.item.ItemStack(EMERALD, 1));
+			stuffed90.set(net.minecraft.core.component.DataComponents.BUNDLE_CONTENTS, mut90.toImmutable());
+			red1.getInventory().add(stuffed90);
+
+			sm.clearProsecuteLimitsForTest();
+			boolean initiated90 = sm.initiate(red1, red2);
+			sm.decide(srv, red2.getUUID(), red1.getUUID(),
+					com.survivalcontract.smuggle.SmuggleManager.ACTION_ACCEPT_BRIBE);
+			check(initiated90 && gsm.getScore(red2.getUUID()) == 32 && bribe90.isEmpty()
+							&& !(red1.containerMenu instanceof net.minecraft.world.inventory.ChestMenu)
+							&& countItem(red1, GOLD) == 0 && countItem(red1, EMERALD) == 0,
+					"受贿结算不漏计：内嵌物品 + 光标物品全部计入并清空",
+					"检察官 +32（袋内钻石16 + 内嵌绿宝石8 + 光标金锭8），贿赂袋清空、界面关闭、光标物品收走");
+
+			// ---- ② 达标胜利（个人）：3 人参赛 → 900 分，899 不结束、900 直接获胜 ----
+			gsm.setForcedWinners(java.util.List.of());
+			gsm.resetScores();
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) gsm.setScore(p.getUUID(), 0);
+			gsm.setCurrentPhase(GameStateManager.GamePhase.PLAYING);
+			gsm.addScore(red1.getUUID(), 899);
+			boolean soloNotYet = gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING;
+			gsm.addScore(red1.getUUID(), 1);
+			check(soloNotYet && gsm.getCurrentPhase() == GameStateManager.GamePhase.FINISHED
+							&& gsm.getWinnersByScore().equals(java.util.List.of(red1.getUUID())),
+					"达标胜利（个人）：3 人参赛 = 900 分",
+					"899 分仍在进行；900 分立即结束，唯一胜者 = red1");
+
+			// ---- ② 达标胜利（团队）：红队合计 900 分（500+400）→ 全队获胜 ----
+			gsm.setCurrentPhase(GameStateManager.GamePhase.PLAYING);
+			gsm.setForcedWinners(java.util.List.of());
+			gsm.setGameMode(GameStateManager.GameMode.TEAMS);
+			gsm.resetPlayerTeams();
+			gsm.setPlayerTeam(red1.getUUID(), GameStateManager.Team.RED);
+			gsm.setPlayerTeam(red2.getUUID(), GameStateManager.Team.RED);
+			gsm.setPlayerTeam(blue1.getUUID(), GameStateManager.Team.BLUE);
+			gsm.resetScores();
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) gsm.setScore(p.getUUID(), 0);
+			gsm.addScore(red1.getUUID(), 500);
+			gsm.addScore(red2.getUUID(), 399);
+			boolean teamNotYet = gsm.getCurrentPhase() == GameStateManager.GamePhase.PLAYING;
+			gsm.addScore(red2.getUUID(), 1);
+			var teamWinners = gsm.getWinnersByScore();
+			check(teamNotYet && gsm.getCurrentPhase() == GameStateManager.GamePhase.FINISHED
+							&& teamWinners.size() == 2 && teamWinners.contains(red1.getUUID())
+							&& teamWinners.contains(red2.getUUID()),
+					"达标胜利（团队）：红队合计 900 分",
+					"899 分仍在进行；900 分立即结束，红队两人同时获胜（蓝队不出现在胜者列表）");
+		} finally {
+			gsm.setPlayStyle(savedStyle);
+			gsm.setCurrentPhase(savedPhase);
+			gsm.setGameMode(savedMode);
+			gsm.setGameStartTime(savedStart);
+			gsm.resetPlayerTeams();
+			savedTeams.forEach(gsm::setPlayerTeam);
+			gsm.setForcedWinners(java.util.List.of());
+			sm.reset();
+			for (ServerPlayer p : new ServerPlayer[]{red1, red2, blue1}) {
+				p.getInventory().clearContent();
+				gsm.setScore(p.getUUID(), 0);
+			}
 		}
 	}
 
@@ -2445,6 +2592,30 @@ public class ServerSelfTest {
 
 			cv.setup(srv);
 
+			// 1.0) 第八十七批：文明时代重生点必须落在 240×240 疆域（WorldBorder）内，且为大本营中心地表——
+			//      旧实现在团队模式用 ±120/±240 偏移，红蓝点正好贴在/越过边界（开局限界外/虚空问题根因）
+			ServerLevel civLv0 = ArenaWorldManager.getArenaOverworld(srv);
+			check(civLv0 != null, "文明时代竞技场存在（禁止退回主世界）",
+					civLv0 != null ? "arena 已创建" : "arena=null（setup 会直接中止）");
+			if (civLv0 != null) {
+				var border0 = civLv0.getWorldBorder();
+				double half0 = border0.getSize() / 2.0;
+				int outside0 = 0;
+				StringBuilder sb0 = new StringBuilder();
+				for (ServerPlayer pp : new ServerPlayer[]{red1, red2, blue1}) {
+					BlockPos rp = gsm.getRespawnPoint(pp.getUUID());
+					double dx = Math.abs(rp.getX() + 0.5 - border0.getCenterX());
+					double dz = Math.abs(rp.getZ() + 0.5 - border0.getCenterZ());
+					boolean bad = rp.getY() <= civLv0.getMinY() + 1 || dx > half0 || dz > half0;
+					if (bad) {
+						outside0++;
+						sb0.append(pp.getName().getString()).append("=").append(rp).append(" ");
+					}
+				}
+				check(outside0 == 0, "文明时代重生点在疆域边界内",
+						"border=" + border0.getSize() + " 越界/埋地=" + outside0 + " " + sb0);
+			}
+
 			// 1) 疆域：15×15 = 225 区块全部登记
 			check(cv.zoneCount() == 15 * 15, "疆域区块分配", cv.zoneCount() + " 区块（应 225）");
 
@@ -2606,7 +2777,7 @@ public class ServerSelfTest {
 							&& cfg0.zoneOutput(sandT) == net.minecraft.world.item.Items.SAND,
 					"沙区默认产出", "20 秒 ×8 沙子");
 			var sandBonus = cfg0.zoneBonuses(sandT);
-			check(sandBonus.size() == 3 && sandBonus.get(0).chancePercent() == 5.0 && sandBonus.get(0).count() == 1
+			check(sandBonus.size() == 3 && sandBonus.get(0).chancePercent() == 10.0 && sandBonus.get(0).count() == 1
 							&& sandBonus.get(0).items().length == 1
 							&& sandBonus.get(0).items()[0] == net.minecraft.world.item.Items.GUNPOWDER
 							&& sandBonus.get(1).chancePercent() == 10.0 && sandBonus.get(1).count() == 1
@@ -2615,15 +2786,15 @@ public class ServerSelfTest {
 							&& sandBonus.get(2).chancePercent() == 15.0 && sandBonus.get(2).count() == 1
 							&& sandBonus.get(2).items().length == 1
 							&& sandBonus.get(2).items()[0] == net.minecraft.world.item.Items.GLASS,
-					"沙区默认副产物", "火药 5% ×1 + 甘蔗 10% ×1 + 玻璃 15% ×1");
+					"沙区默认副产物", "火药 10% ×1 + 甘蔗 10% ×1 + 玻璃 15% ×1");
 			var sandReq = cfg0.zoneRequireBlocks(sandT);
 			check(sandReq.length == 1 && net.minecraft.core.registries.BuiltInRegistries.BLOCK
 							.getKey(sandReq[0]).toString().equals("minecraft:ender_chest"),
 					"沙区默认前置方块", "末影箱（放置后才产出）");
-			check(Integer.valueOf(5).equals(cfg0.zoneLimit(com.survivalcontract.civilization.CivilizationManager.ZoneType.ALLOY))
-							&& Integer.valueOf(20).equals(cfg0.zoneLimit(com.survivalcontract.civilization.CivilizationManager.ZoneType.DIAMOND))
+			check(Integer.valueOf(3).equals(cfg0.zoneLimit(com.survivalcontract.civilization.CivilizationManager.ZoneType.ALLOY))
+							&& Integer.valueOf(15).equals(cfg0.zoneLimit(com.survivalcontract.civilization.CivilizationManager.ZoneType.DIAMOND))
 							&& cfg0.zoneLimit(com.survivalcontract.civilization.CivilizationManager.ZoneType.WOOD) == null,
-					"资源区数量上限默认", "合金 ≤5 / 钻石 ≤20 / 木头无限制");
+					"资源区数量上限默认", "合金 ≤3 / 钻石 ≤15 / 木头无限制");
 			int sandZones = 0, alloyZones = 0, diamondZones = 0;
 			for (int cx = -7; cx <= 7; cx++) {
 				for (int cz = -7; cz <= 7; cz++) {
@@ -2635,8 +2806,8 @@ public class ServerSelfTest {
 				}
 			}
 			check(sandZones >= 1, "沙区生成", "setup 随机分配含沙区（" + sandZones + " 个）");
-			check(alloyZones <= 5, "合金区数量上限生效", alloyZones + " ≤ 5");
-			check(diamondZones <= 20, "钻石区数量上限生效", diamondZones + " ≤ 20");
+			check(alloyZones <= 3, "合金区数量上限生效", alloyZones + " ≤ 3");
+			check(diamondZones <= 15, "钻石区数量上限生效", diamondZones + " ≤ 15");
 
 			// 2.2) 第四十九批：概率调整默认值 + 大本营物资间隔公式
 			// （配置版本迁移：旧版本文件自动备份 .bak 并重新生成 → get() 必为新默认值）
@@ -2666,16 +2837,16 @@ public class ServerSelfTest {
 							&& lapisBonus.get(1).items()[0] == net.minecraft.world.item.Items.EXPERIENCE_BOTTLE,
 					"青金石区经验瓶概率默认", "15%");
 			var diaBonus = cfg0.zoneBonuses(diamondT);
-			check(diaBonus.size() == 1 && diaBonus.get(0).chancePercent() == 10.0
+			check(diaBonus.size() == 1 && diaBonus.get(0).chancePercent() == 20.0
 							&& diaBonus.get(0).items().length == 1
 							&& diaBonus.get(0).items()[0] == net.minecraft.world.item.Items.OBSIDIAN
 							&& diaBonus.get(0).totalCap() == 30,
-					"钻石区黑曜石概率/单区上限默认", "10% + 每区 ≤30");
+					"钻石区黑曜石概率/单区上限默认", "20% + 每区 ≤30");
 			var quartzBonus = cfg0.zoneBonuses(quartzT);
-			check(quartzBonus.size() == 1 && quartzBonus.get(0).chancePercent() == 8.0
+			check(quartzBonus.size() == 1 && quartzBonus.get(0).chancePercent() == 15.0
 							&& quartzBonus.get(0).items().length == 1
 							&& quartzBonus.get(0).items()[0] == net.minecraft.world.item.Items.NETHER_WART,
-					"石英区副产物概率默认", "地狱疣 8%（烈焰棒已删除）");
+					"石英区副产物概率默认", "地狱疣 15%（烈焰棒已删除）");
 			var hc0 = cfg0.hqSupplies;
 			check(hc0.intervalSeconds == 300 && hc0.claimsPerStep == 5
 							&& hc0.reducePerStepSeconds == 15 && hc0.minSeconds == 60,
@@ -3010,7 +3181,7 @@ public class ServerSelfTest {
 			try {
 				java.nio.file.Files.writeString(cfgFile, """
 						{
-						  "configVersion": 5,
+						  "configVersion": 6,
 						  "zones": {
 						    "QUARTZ": {
 						      "intervalSeconds": 30, "output": "quartz", "count": 4, "outputChancePercent": 50,
@@ -3159,7 +3330,7 @@ public class ServerSelfTest {
 			try {
 				java.nio.file.Files.writeString(tradeFile, """
 						{
-						  "configVersion": 3,
+						  "configVersion": 4,
 						  "merchant": {
 						    "woolInitialCost": 50, "woolCostStep": 10, "woolMaxCost": 200,
 						    "goods": [
@@ -3849,27 +4020,27 @@ public class ServerSelfTest {
 
 			// ---- ⑤c 图2 产出配置 ----
 			var cfg53 = com.survivalcontract.civilization.CivilizationProductionConfig.reload();
-			check(cfg53.configVersion == 5, "产出配置版本 v5", "configVersion=" + cfg53.configVersion);
+			check(cfg53.configVersion == 6, "产出配置版本 v6", "configVersion=" + cfg53.configVersion);
 			var wood53 = cfg53.zones.get("WOOD");
-			check(wood53 != null && "oak_log".equals(wood53.output) && wood53.count == 6
+			check(wood53 != null && "oak_log".equals(wood53.output) && wood53.count == 8
 							&& (wood53.requireBlocks == null || wood53.requireBlocks.isEmpty()),
-					"木头区产出 oak_log×6 无前置（橡木原木）",
+					"木头区产出 oak_log×8 无前置（橡木原木）",
 					wood53 == null ? "缺失" : wood53.output + "×" + wood53.count);
 			var stone53 = cfg53.zones.get("STONE");
 			var stoneReq53 = reqNorm53(stone53);
-			check(stone53 != null && "cobblestone".equals(stone53.output) && stone53.count == 10
+			check(stone53 != null && "cobblestone".equals(stone53.output) && stone53.count == 8
 							&& stoneReq53.equals(List.of("oak_wood")),
-					"石头区圆石×10 前置橡木木头（六面皮木块）", stone53 == null ? "缺失" : stone53.output + " req=" + stoneReq53);
+					"石头区圆石×8 前置橡木木头（六面皮木块）", stone53 == null ? "缺失" : stone53.output + " req=" + stoneReq53);
 			check(reqNorm53(cfg53.zones.get("COPPER")).equals(List.of("furnace", "coal_block")),
 					"铜区前置=熔炉+煤炭块", reqNorm53(cfg53.zones.get("COPPER")).toString());
 			var iron53 = cfg53.zones.get("IRON");
-			check(iron53 != null && "raw_iron".equals(iron53.output) && iron53.count == 8
+			check(iron53 != null && "iron_ingot".equals(iron53.output) && iron53.count == 8
 							&& reqNorm53(iron53).equals(List.of("furnace", "copper_block", "waxed_copper_chest")),
-					"铁区粗铁×8 前置=熔炉+铜块+涂蜡的铜箱子", iron53 == null ? "缺失" : iron53.output + " req=" + reqNorm53(iron53));
+					"铁区铁锭×8 前置=熔炉+铜块+涂蜡的铜箱子", iron53 == null ? "缺失" : iron53.output + " req=" + reqNorm53(iron53));
 			var gold53 = cfg53.zones.get("GOLD");
-			check(gold53 != null && "raw_gold".equals(gold53.output) && gold53.count == 10
+			check(gold53 != null && "gold_ingot".equals(gold53.output) && gold53.count == 8
 							&& reqNorm53(gold53).equals(List.of("blast_furnace", "iron_block", "waxed_copper_chest")),
-					"金区粗金×10 前置=高炉+铁块+涂蜡的铜箱子", gold53 == null ? "缺失" : gold53.output + " req=" + reqNorm53(gold53));
+					"金区金锭×8 前置=高炉+铁块+涂蜡的铜箱子", gold53 == null ? "缺失" : gold53.output + " req=" + reqNorm53(gold53));
 			check(reqNorm53(cfg53.zones.get("DIAMOND")).equals(List.of("blast_furnace", "gold_block", "waxed_copper_chest")),
 					"钻石区前置=高炉+金块+涂蜡的铜箱子", reqNorm53(cfg53.zones.get("DIAMOND")).toString());
 			var quartz53 = cfg53.zones.get("QUARTZ");
@@ -4403,7 +4574,15 @@ public class ServerSelfTest {
 				gsm.setCurrentPhase(GameStateManager.GamePhase.PLAYING);
 				cm.clearPlayerChallenges(u);
 				cm.enableChallenge(u, "dust_lung");
-				dustImmP.snapTo(dustImmX, -10, dustImmZ);
+				// 竞技场已由 case4 建好：PLAYING 的防逃跑扫描会把竞技场外的玩家拉回去，
+				// 因此本测试直接在竞技场内负层进行（否则 2 秒扫描会打断 y<0 断言）
+				ServerLevel dustLevel = ensureTestArena();
+				if (dustLevel != null) {
+					dustImmP.teleportTo(dustLevel, dustImmX, -10, dustImmZ, Set.of(),
+							dustImmP.getYRot(), dustImmP.getXRot(), false);
+				} else {
+					dustImmP.snapTo(dustImmX, -10, dustImmZ);
+				}
 				dustImmP.removeEffect(net.minecraft.world.effect.MobEffects.POISON);
 				pm.setPlayerProfession(u, ProfessionManager.Profession.MINER);
 				// 预置 59：下一个真实整秒 merge→60 即触发（矿工应被免疫门控挡住，不触发）
@@ -4477,6 +4656,22 @@ public class ServerSelfTest {
 			if (s.is(item)) return inv.removeItemNoUpdate(i);
 		}
 		return net.minecraft.world.item.ItemStack.EMPTY;
+	}
+
+	/**
+	 * 自测辅助：确保竞技场维度已创建。
+	 * 第八十七批起 CivilizationManager.setup 在竞技场缺失时拒绝退回原版主世界（防止给大厅套边界/刷实体），
+	 * 而文明时代相关断言都跑在开局之前，因此测试必须先显式把竞技场建出来。
+	 */
+	private static ServerLevel ensureTestArena() {
+		var srv = server.get();
+		ServerLevel arena = ArenaWorldManager.getArenaOverworld(srv);
+		if (arena == null) {
+			ArenaWorldManager.createArenaWorlds(srv);
+			arena = ArenaWorldManager.getArenaOverworld(srv);
+			SurvivalContract.LOGGER.info("[SC-TEST] civ test arena created: {}", arena != null);
+		}
+		return arena;
 	}
 
 	private static void startGame() {
@@ -4628,6 +4823,10 @@ public class ServerSelfTest {
 		dm.giveChallengeBook(p);
 		p.getInventory().add(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.DIAMOND_SWORD));
 		p.getInventory().add(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BREAD, 16));
+		// 模拟对局中攒下的经验槽（等级 / 进度 / 总经验）
+		p.experienceLevel = 12;
+		p.experienceProgress = 0.5f;
+		p.totalExperience = 350;
 		dm.teleportToLobby(p);
 		int nonEmpty = 0;
 		boolean bookFound = false;
@@ -4641,6 +4840,10 @@ public class ServerSelfTest {
 		}
 		check(nonEmpty == 1 && bookFound, "回大厅清空物品",
 				"物品栏仅剩挑战书 (非空 " + nonEmpty + " 件, 书=" + bookFound + ")");
+		check(p.experienceLevel == 0 && p.experienceProgress == 0.0f && p.totalExperience == 0,
+				"回大厅清空经验槽",
+				"等级 12→" + p.experienceLevel + " 进度 0.50→" + p.experienceProgress
+						+ " 总经验 350→" + p.totalExperience);
 	}
 
 	/** 大厅配置：config 文件夹/配置文件生成、自定义出生点、自定义存档 zip 替换大厅地图 */
@@ -4804,6 +5007,35 @@ public class ServerSelfTest {
 		BlockPos sp = gsm.getPlayingSpawn();
 		check(Math.abs(sp.getX()) < 1000 && Math.abs(sp.getZ()) < 1000,
 				"出生点坐标在千位以内", sp.toShortString());
+
+		// 第八十七批回归：文明时代/神的谎言/走私犯/附属玩法没有最终目标（开局置 null），
+		// 旧实现直接 name() 抛 NPE → 快照永远写不出 → 重启后玩法退回 NORMAL → 四种地形预设全部失效。
+		gsm.setCurrentFinalGoal(null);
+		gsm.setPlayStyle(GameStateManager.PlayStyle.GODS_LIES);
+		gsm.setTerrainPreset(GameStateManager.TerrainPreset.DESERT);
+		SessionPersistence.save(s);
+		check(java.nio.file.Files.exists(file), "finalGoal=null 时快照仍能落盘", file.getFileName().toString());
+		// 模拟重启后的默认内存态：玩法/地形预设必须从快照读回，且必须在重建竞技场之前生效
+		gsm.setPlayStyle(GameStateManager.PlayStyle.NORMAL);
+		gsm.setTerrainPreset(GameStateManager.TerrainPreset.OVERWORLD);
+		gsm.setCurrentFinalGoal(GameStateManager.FinalGoal.WITHER);
+		boolean restoredNullGoal = SessionPersistence.restore(s);
+		check(restoredNullGoal && gsm.getCurrentFinalGoal() == null,
+				"finalGoal=null 恢复", "restored=" + restoredNullGoal + " goal=" + gsm.getCurrentFinalGoal());
+		check(gsm.getPlayStyle() == GameStateManager.PlayStyle.GODS_LIES
+						&& gsm.getTerrainPreset() == GameStateManager.TerrainPreset.DESERT,
+				"玩法/地形预设随快照恢复（重建竞技场前生效）",
+				"playStyle=" + gsm.getPlayStyle() + " preset=" + gsm.getTerrainPreset());
+
+		// 文明时代/附属玩法快照不跨重启恢复：疆域/大本营实体等运行时状态没有持久化，
+		// 强行恢复只会得到"没有疆域和边界"的假对局（玩家在边界外/虚空）→ 清快照回大厅
+		gsm.setPlayStyle(GameStateManager.PlayStyle.CIVILIZATION);
+		gsm.setCurrentFinalGoal(null);
+		SessionPersistence.save(s);
+		boolean restoredCiv = SessionPersistence.restore(s);
+		check(!restoredCiv && !java.nio.file.Files.exists(file),
+				"文明时代快照不跨重启恢复（回大厅并清快照）",
+				"restored=" + restoredCiv + " fileExists=" + java.nio.file.Files.exists(file));
 
 		// 清理，避免影响后续手动测试
 		SessionPersistence.clear(s);
