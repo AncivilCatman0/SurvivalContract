@@ -1,0 +1,256 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+// ============ MC 版本映射表（新增版本只改这里） ============
+ext {
+	mcVersions = [
+		"26.2": [
+			minecraft_version:  "26.2",
+			loader_version:     "0.19.3",
+			loom_version:       "1.18.3",
+			fabric_api_version:  "0.161.0+26.2"
+		],
+		"26.3": [
+			minecraft_version:  "26.3",
+			loader_version:     "0.19.5",
+			loom_version:       "1.18.3",
+			fabric_api_version:  "0.162.0+26.3"
+		]
+	]
+}
+
+// ============ 读 mc_target，覆盖 Gradle properties ============
+def mcTarget = project.hasProperty('mc_target') ? String.valueOf(project.property('mc_target')) : '26.2'
+def mcMap = mcVersions[mcTarget]
+if (mcMap == null) {
+	throw new GradleException("不支持的 mc_target=${mcTarget}；可用：${mcVersions.keySet()}")
+}
+project.ext.minecraft_version     = mcMap.minecraft_version
+project.ext.loader_version        = mcMap.loader_version
+project.ext.loom_version          = mcMap.loom_version
+project.ext.fabric_api_version    = mcMap.fabric_api_version
+// jar 名统一带 mc 后缀（让两个版本的 jar 可以在同一目录并存）
+project.ext.mc_version_tag       = mcTarget.replace('.', '_')
+// 部署目录：上级目录下按 mc 版本分子目录（避免同 jar 互相覆盖）
+project.ext.deploySubDir          = "mc${mcTarget}"
+
+repositories {
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"survival-contract" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+
+	runs {
+		client {
+			// 可选：直接进入指定单人存档（-PscWorld=存档名），用于自动化自测
+			if (project.hasProperty('scWorld')) {
+				programArgs "--quickPlaySingleplayer", project.property('scWorld').toString()
+			}
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+// ============ 跨 MC 版本的 ServerPlayerDropMixin 动态生成 ============
+// 26.2: ServerPlayer.drop(ItemStack, boolean, boolean) — 第三参数 boolean
+// 26.3: ServerPlayer.drop(ItemStack, boolean, Prediction) — 第三参数 Prediction（枚举）
+// Mixin 框架要求 handler 参数 descriptor 精确匹配，且 Prediction 只在 26.3 存在。
+// 所以根据 mc_target 在 build/generated/sources/mixin/ 下生成正确的 Mixin 类。
+def mixinGenDir = layout.buildDirectory.dir('generated/sources/mixin/main/java')
+def generateMixin = tasks.register('generateServerPlayerDropMixin') {
+	inputs.property 'mcTarget', mcTarget
+	outputs.dir mixinGenDir
+	doLast {
+		mixinGenDir.get().asFile.mkdirs()
+		def pkgDir = new File(mixinGenDir.get().asFile, 'com/survivalcontract/mixin')
+		pkgDir.mkdirs()
+		def src
+		if (mcTarget == '26.2') {
+			src = '''package com.survivalcontract.mixin;
+
+import com.survivalcontract.game.GameStateManager;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+/**
+ * 检查室禁丢弃（26.2 版）：ServerPlayer.drop 三参数（ItemStack, boolean, boolean）。
+ * 由 Gradle generateServerPlayerDropMixin 任务根据 mc_target 自动生成。
+ */
+@Mixin(ServerPlayer.class)
+public abstract class ServerPlayerDropMixin {
+
+	@Inject(method = "drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;",
+			at = @At("HEAD"), cancellable = true)
+	private void sc$blockInspectionDrop(ItemStack stack, boolean throwRandomly, boolean includeThrower,
+			CallbackInfoReturnable<ItemEntity> cir) {
+		if (stack.isEmpty()) return;
+		ServerPlayer self = (ServerPlayer) (Object) this;
+		if (!self.isAlive()) {
+			GameStateManager gsm0 = GameStateManager.getInstance();
+			if (gsm0.getCurrentPhase() == GameStateManager.GamePhase.PLAYING && gsm0.isCivilization()
+					&& com.survivalcontract.civilization.CivilizationManager.getInstance()
+							.handleDeathDrop(self, stack)) {
+				cir.setReturnValue(null);
+				return;
+			}
+			if (gsm0.handleModeBookDeathDrop(self, stack)) {
+				cir.setReturnValue(null);
+				return;
+			}
+			return;
+		}
+		GameStateManager gsm = GameStateManager.getInstance();
+		if (gsm.getCurrentPhase() != GameStateManager.GamePhase.PLAYING || !gsm.isStowaway()) return;
+		if (!com.survivalcontract.smuggle.SmuggleManager.getInstance().isInInspection(self.getUUID())) return;
+		self.getInventory().add(stack);
+		cir.setReturnValue(null);
+		self.sendSystemMessage(Component.literal("§c检查室内无法丢弃物品！"));
+	}
+}
+'''
+		} else {
+			src = '''package com.survivalcontract.mixin;
+
+import com.survivalcontract.game.GameStateManager;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Prediction;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+/**
+ * 检查室禁丢弃（26.3 版）：ServerPlayer.drop 三参数（ItemStack, boolean, Prediction）。
+ * 由 Gradle generateServerPlayerDropMixin 任务根据 mc_target 自动生成。
+ */
+@Mixin(ServerPlayer.class)
+public abstract class ServerPlayerDropMixin {
+
+	@Inject(method = "drop(Lnet/minecraft/world/item/ItemStack;ZLnet/minecraft/util/Prediction;)Lnet/minecraft/world/entity/item/ItemEntity;",
+			at = @At("HEAD"), cancellable = true)
+	private void sc$blockInspectionDrop(ItemStack stack, boolean throwRandomly, Prediction prediction,
+			CallbackInfoReturnable<ItemEntity> cir) {
+		if (stack.isEmpty()) return;
+		ServerPlayer self = (ServerPlayer) (Object) this;
+		if (!self.isAlive()) {
+			GameStateManager gsm0 = GameStateManager.getInstance();
+			if (gsm0.getCurrentPhase() == GameStateManager.GamePhase.PLAYING && gsm0.isCivilization()
+					&& com.survivalcontract.civilization.CivilizationManager.getInstance()
+							.handleDeathDrop(self, stack)) {
+				cir.setReturnValue(null);
+				return;
+			}
+			if (gsm0.handleModeBookDeathDrop(self, stack)) {
+				cir.setReturnValue(null);
+				return;
+			}
+			return;
+		}
+		GameStateManager gsm = GameStateManager.getInstance();
+		if (gsm.getCurrentPhase() != GameStateManager.GamePhase.PLAYING || !gsm.isStowaway()) return;
+		if (!com.survivalcontract.smuggle.SmuggleManager.getInstance().isInInspection(self.getUUID())) return;
+		self.getInventory().add(stack);
+		cir.setReturnValue(null);
+		self.sendSystemMessage(Component.literal("§c检查室内无法丢弃物品！"));
+	}
+}
+'''
+		}
+		new File(pkgDir, 'ServerPlayerDropMixin.java').write(src)
+	}
+}
+
+// 让生成的 Mixin 类参与编译（原 src/main/java 下的同名文件已删除，无需 exclude）
+sourceSets {
+	main {
+		java {
+			srcDir mixinGenDir.get().asFile
+		}
+	}
+}
+
+tasks.named('compileJava').configure {
+	dependsOn generateServerPlayerDropMixin
+}
+
+// Gradle 9 strict mode: 所有 Jar 类型任务（含 sourcesJar，它在 afterEvaluate 阶段才注册）
+// 都隐式使用了生成的源目录，必须显式声明依赖，否则报 implicit dependency 违规
+tasks.withType(Jar).configureEach {
+	dependsOn generateServerPlayerDropMixin
+}
+
+// jar 名自动带 mc 后缀：survival-contract-1.0.0-mc26_2.jar
+jar {
+	def baseName = "survival-contract-${project.version}-mc${mc_version_tag}"
+	archiveFileName = "${baseName}.jar"
+
+	from("LICENSE") {
+		rename { "${it}_survival-contract" }
+	}
+}
+
+// 自动部署：build 完成后把 jar 复制到上级目录的 mc 子目录（例如 f:\survivalcontract\mc26.2\survival-contract-1.0.0-mc26_2.jar）
+tasks.register('deployJar', Copy) {
+	dependsOn tasks.named('build')
+	group = 'survival-contract'
+	description = "Copies the MC ${mcTarget} mod jar to project parent / ${deploySubDir}/"
+	from(layout.buildDirectory.dir('libs'))
+	include "survival-contract-${project.version}-mc${mc_version_tag}.jar"
+	into rootProject.projectDir.parentFile.toPath().resolve(deploySubDir).toFile()
+	doNotTrackState('上级目录含 Gradle 无法读取的非本项目文件')
+}
+tasks.named('build') { finalizedBy 'deployJar' }
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	repositories {
+	}
+}
